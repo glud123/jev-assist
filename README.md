@@ -1,11 +1,13 @@
 # jev-assist
 
-Typed judgments over a codebase, using [TypeSafe Jev](https://docs.typesafe.ai). Three things
-that are worth doing a few hundred times and pointless to do once:
+Typed judgments over a codebase, using [TypeSafe Jev](https://docs.typesafe.ai). Judgments
+worth making a few hundred times and pointless to make once — plus a way to check whether
+they hold on your repo:
 
 | Command | Question it answers | Cost |
 | --- | --- | --- |
 | `jev rerank "<task>"` | Which files matter for this task? | 1 call / 60 files |
+| `jev validate [n]` | Is rerank accurate enough **on my repo**? | n × rerank |
 | `jev drift [glob]` | Which files drifted from our conventions? | 1 call / file |
 | `jev gate [ref]` | Does this diff touch something dangerous? | 1 call / diff |
 
@@ -28,6 +30,7 @@ Node 18+ (uses built-in `fetch`). No dependencies.
 ```sh
 cd /path/to/your/repo
 cp /path/to/jev-assist/jev.config.example.json jev.config.json   # then edit
+jev validate 20                                                   # start here: is it accurate?
 jev rerank "add CSV export to the orders table"
 jev drift 'src/**/*.tsx'
 jev gate                                                          # staged changes
@@ -65,15 +68,33 @@ not to raise the threshold.
 
 ## Validate before trusting
 
-Typed output guarantees the shape of an answer, not its correctness. Calibrate on ground
-truth you already have: a commit message is a task, and the files that commit changed are the
-answer.
+Typed output guarantees the shape of an answer, not its correctness. Accuracy does not
+transfer between repos, so the numbers below are ours, not yours. Get yours:
 
 ```sh
-git log --oneline -20                       # pick a commit
-jev rerank "<its message>"                  # then compare against:
-git show --name-only --format="" <sha>
+jev validate 20
 ```
+
+Ground truth comes from git, free: a commit message is a task, the files that commit changed
+are the answer. `validate` replays the last n commits, ranks the whole repo against each
+subject line, and prints recall at each cutoff.
+
+```
+  #  task                                    truth   @20   @40
+  1  fix avatar upload failing on Safari              7     5     6
+  2  add CSV export to the orders table          4     4     4
+  3  bump deps and fix lint                     12     2     3
+
+  recall@20 0.48   recall@40 0.57   (23 files over 3 commits)
+  worst: "bump deps and fix lint" — 2/12
+```
+
+Read the last line as much as the first: dependency bumps and sweeping renames have no
+semantic signal and will always score low. That tells you which tasks to use `rerank` for.
+
+Two things `validate` handles that a hand-rolled comparison gets wrong. Files a commit
+**added** are excluded — they did not exist when the task was written, so counting them
+inflates recall. Files it **deleted** are gone from today's tree and cannot be ranked at all.
 
 Measured this way on one private 705-file React app:
 
@@ -85,8 +106,8 @@ Measured this way on one private 705-file React app:
 - **drift** — 0.97 and 0.62 on two files importing a UI library inconsistently, where 0.62 correctly
   described a file mixing both import styles. 231–953ms per file.
 
-Note the leak to avoid when doing this: files *created* by the commit exist in today's tree
-but would not have at task time, so they inflate recall. Exclude them.
+Run `validate` before trusting `drift` or `gate` on a new repo too. It only scores `rerank`,
+but a repo where `rerank` reads low is one where the config's phrasing needs work first.
 
 ## Known limits
 

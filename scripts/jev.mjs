@@ -3,6 +3,7 @@
 //   rerank "<task>"   score every tracked file for relevance to a task
 //   drift [glob]      scan files for convention drift
 //   gate [ref]        judge a diff for risks linters cannot see
+//   validate [n]      measure rerank recall against your own commit history
 // Conventions and exemptions come from jev.config.json in the repo root.
 // ponytail: sequential calls, no backoff. Add p-limit + 429 retry when pools exceed ~50 batches.
 import { readFile, writeFile } from 'node:fs/promises';
@@ -57,10 +58,8 @@ const LEVELS = [
   'Directly involved: likely must be read or edited to do the task.',
 ];
 
-async function rerank(task) {
-  if (!task) die('rerank needs a task description');
-  const cfg = await config();
-  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+// Score every file for one task, highest first. Shared by rerank and validate.
+async function score(task, files, cfg, quiet) {
   const batch = cfg.batchSize ?? 60;
   const rows = [];
   let ms = 0;
@@ -78,10 +77,20 @@ async function rerank(task) {
     slice.forEach((path, n) => rows.push({ path, ...r.answers[`f${n}`] }));
     ms += r.ms;
     tokens += r.usage.input_tokens;
-    process.stderr.write(`  batch ${Math.floor(i / batch) + 1}/${Math.ceil(files.length / batch)}  ${r.ms}ms\n`);
+    if (!quiet) {
+      process.stderr.write(`  batch ${Math.floor(i / batch) + 1}/${Math.ceil(files.length / batch)}  ${r.ms}ms\n`);
+    }
   }
 
   rows.sort((a, b) => b.score - a.score);
+  return { rows, ms, tokens };
+}
+
+async function rerank(task) {
+  if (!task) die('rerank needs a task description');
+  const cfg = await config();
+  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const { rows, ms, tokens } = await score(task, files, cfg);
   const top = rows.slice(0, cfg.topN ?? 20);
   console.log(`\n${files.length} files, ${ms}ms, ${tokens} input tokens\n`);
   for (const r of top) console.log(`  ${r.score.toFixed(2)}  ${r.path}`);
@@ -90,6 +99,80 @@ async function rerank(task) {
       '  Follow the imports of these before assuming the list is complete.'
   );
   await writeFile('.jev-rerank.json', JSON.stringify(rows, null, 1));
+}
+
+// ---------------------------------------------------------------- validate
+// Ground truth from git: a commit message is a task, the files it changed are the answer.
+// Files the commit ADDED are excluded — they did not exist when the task was written, so
+// rerank could never have surfaced them, and counting them inflates recall.
+export const truthFrom = (nameStatus, rankable) =>
+  nameStatus
+    .split('\n')
+    .map((l) => l.split('\t'))
+    .filter(([status, path]) => status && path && status[0] !== 'A' && rankable.has(path))
+    .map(([, path]) => path);
+
+export const recallAt = (ranked, truth, k) => {
+  if (!truth.length) return null;
+  const top = new Set(ranked.slice(0, k));
+  return truth.filter((p) => top.has(p)).length;
+};
+
+async function validate(n) {
+  const count = Number(n ?? 10);
+  if (!Number.isInteger(count) || count < 1) die('validate needs a positive commit count');
+  const cfg = await config();
+  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const rankable = new Set(files);
+  const ks = cfg.validateK ?? [20, 40];
+
+  const log = (await git(['log', '-n', String(count * 3), '--no-merges', '--format=%H\t%s'])).trim();
+  const commits = log ? log.split('\n').map((l) => l.split('\t')) : [];
+  if (!commits.length) die('no commits to validate against');
+
+  const cases = [];
+  for (const [sha, subject] of commits) {
+    if (cases.length === count) break;
+    if (!subject?.trim()) continue;
+    const truth = truthFrom(await git(['show', '--no-renames', '--name-status', '--format=', sha]), rankable);
+    if (truth.length) cases.push({ sha, subject, truth });
+  }
+  if (!cases.length) die('no commit touched a rankable file; check "include" in jev.config.json');
+
+  console.log(`\n${files.length} rankable files, ${cases.length} commits, ${ks.join('/')} cutoffs\n`);
+  const totals = Object.fromEntries(ks.map((k) => [k, 0]));
+  let truthTotal = 0;
+  let worst = null;
+
+  for (const [i, c] of cases.entries()) {
+    process.stderr.write(`  ${i + 1}/${cases.length}  ${c.sha.slice(0, 8)}\n`);
+    const { rows } = await score(c.subject, files, cfg, true);
+    const ranked = rows.map((r) => r.path);
+    c.hits = Object.fromEntries(ks.map((k) => [k, recallAt(ranked, c.truth, k)]));
+    truthTotal += c.truth.length;
+    for (const k of ks) totals[k] += c.hits[k];
+    const rate = c.hits[ks[0]] / c.truth.length;
+    if (!worst || rate < worst.rate) worst = { ...c, rate };
+  }
+
+  const width = Math.max(...cases.map((c) => Math.min(c.subject.length, 44)));
+  console.log(`  #  ${'task'.padEnd(width)}  truth  ${ks.map((k) => `@${k}`.padStart(4)).join('  ')}`);
+  for (const [i, c] of cases.entries()) {
+    const task = c.subject.length > 44 ? `${c.subject.slice(0, 41)}...` : c.subject;
+    const cells = ks.map((k) => String(c.hits[k]).padStart(4)).join('  ');
+    console.log(`  ${String(i + 1).padStart(1)}  ${task.padEnd(width)}  ${String(c.truth.length).padStart(5)}  ${cells}`);
+  }
+
+  console.log(
+    `\n  ${ks.map((k) => `recall@${k} ${(totals[k] / truthTotal).toFixed(2)}`).join('   ')}` +
+      `   (${truthTotal} files over ${cases.length} commits)`
+  );
+  console.log(`  worst: "${worst.subject.slice(0, 44)}" — ${worst.hits[ks[0]]}/${worst.truth.length}`);
+  console.log(
+    '\n  Recall is micro-averaged over files, so large commits weigh more.\n' +
+      '  Files added by a commit are excluded: rerank could not have found what did not exist.\n' +
+      '  Ranking happens against today\'s tree, so heavily refactored history reads low.'
+  );
 }
 
 // ---------------------------------------------------------------- drift
@@ -149,7 +232,7 @@ async function gate(ref) {
 // Only dispatch when run as a CLI, so tests can import the helpers above.
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [cmd, arg] = process.argv.slice(2);
-  const cmds = { rerank, drift, gate };
-  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate> [arg]');
+  const cmds = { rerank, drift, gate, validate };
+  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate> [arg]');
   await cmds[cmd](arg);
 }

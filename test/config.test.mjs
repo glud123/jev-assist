@@ -2,7 +2,7 @@
 // Run: node test/config.test.mjs   (no framework, no network)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { exempt, bar } from '../scripts/jev.mjs';
+import { exempt, bar, truthFrom, recallAt } from '../scripts/jev.mjs';
 
 const cfg = JSON.parse(readFileSync(new URL('../jev.config.example.json', import.meta.url), 'utf8'));
 
@@ -43,5 +43,29 @@ for (const group of ['conventions', 'gates']) {
 for (const key of Object.keys(cfg.exemptions ?? {})) {
   assert.ok(cfg.conventions[key], `exemptions.${key} names no convention`);
 }
+
+// truthFrom: the leak this guards against is 'A' — a file the commit created did not exist
+// when the task was written, so counting it as findable inflates recall.
+const rankable = new Set(['src/a.ts', 'src/b.ts', 'src/new.ts']);
+assert.deepEqual(
+  truthFrom('M\tsrc/a.ts\nA\tsrc/new.ts\nM\tsrc/b.ts', rankable),
+  ['src/a.ts', 'src/b.ts']
+);
+// deleted files are gone from today's tree, so they are unrankable and drop out
+assert.deepEqual(truthFrom('D\tsrc/gone.ts\nM\tsrc/a.ts', rankable), ['src/a.ts']);
+// files outside the include globs are not candidates, so they cannot count against recall
+assert.deepEqual(truthFrom('M\tREADME.md\nM\tsrc/a.ts', rankable), ['src/a.ts']);
+// empty and malformed input must yield no truth rather than throwing
+assert.deepEqual(truthFrom('', rankable), []);
+assert.deepEqual(truthFrom('\n\nM\n', rankable), []);
+
+// recallAt: counts truth files inside the top k, and reports nothing when there is no truth
+const ranked = ['src/a.ts', 'src/x.ts', 'src/b.ts', 'src/y.ts'];
+assert.equal(recallAt(ranked, ['src/a.ts', 'src/b.ts'], 4), 2);
+assert.equal(recallAt(ranked, ['src/a.ts', 'src/b.ts'], 2), 1);   // b.ts sits at rank 3
+assert.equal(recallAt(ranked, ['src/a.ts', 'src/b.ts'], 1), 1);
+assert.equal(recallAt(ranked, ['src/missing.ts'], 4), 0);          // never ranked at all
+assert.equal(recallAt(ranked, [], 4), null);                       // no ground truth to score
+assert.equal(recallAt(ranked, ['src/b.ts'], 99), 1);               // k past the end is fine
 
 console.log('ok');

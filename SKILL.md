@@ -1,6 +1,6 @@
 ---
 name: jev-assist
-description: Use typed judgments (TypeSafe Jev) over a codebase to preselect context for a task, scan for convention drift, and gate diffs on risks linters cannot see. Use when starting work in an unfamiliar or large repo, auditing consistency across many files, or reviewing a diff before commit.
+description: Rank every file in a repo by relevance to a task, so you read the right files instead of grepping for keywords. Use this FIRST when starting work in a repo too large to read, or when you do not know which files a task touches. Also scans for convention drift and gates diffs on risks linters cannot see, and measures its own accuracy against the repo's commit history.
 ---
 
 # jev-assist
@@ -20,7 +20,7 @@ Needs `JEV_API_KEY` in the environment and a `jev.config.json` in the repo root
 (copy `jev.config.example.json`). Conventions and gates are per-project on purpose —
 see "Why the config is per-project" below.
 
-## The three commands
+## The commands
 
 ### `jev rerank "<task>"` — before writing code
 
@@ -40,6 +40,28 @@ file landed at 121/705). Semantic scoring cannot see structural coupling. Always
 imports of the top results before assuming the list is complete.
 
 Run once per task, not per edit. 16s is fine at the start of work and wrong inside a loop.
+
+### `jev validate [n]` — before trusting any of this on a new repo
+
+Replays the last n commits as tasks and scores `rerank` against what each commit actually
+changed. Run it once per repo, before relying on a ranking you cannot check.
+
+```sh
+jev validate 20
+```
+
+Recall does not transfer between repos. A number measured on a 705-file React app says
+nothing about a Go monolith, and a confident 0.87 on a file is unfalsifiable on its own.
+This makes it falsifiable using history the repo already has.
+
+Read the `worst:` line as carefully as the recall figure. Dependency bumps and sweeping
+renames have no semantic signal and score low by nature — that is a fact about the task, not
+a defect. It tells you when to skip `rerank` entirely.
+
+Two adjustments it makes that a hand-rolled comparison misses: files a commit **added** are
+excluded, because they did not exist when the task was written and counting them inflates
+recall; files it **deleted** cannot be ranked against today's tree at all. Do not reimplement
+this with `git show --name-only` and skip them.
 
 ### `jev drift [glob]` — auditing consistency
 
@@ -84,9 +106,9 @@ Tune for this early. An audit that cries wolf gets ignored, and an ignored gate 
 than no gate — it costs money and buys a false sense of coverage.
 
 **Typed output guarantees shape, not correctness.** A confident number can be confidently
-wrong. Before trusting a convention or gate on a new repo, validate it against something you
-already know: run it on files whose answer you verified by hand, or on old commits whose
-outcome is on record. Without that step you are reading probabilities you cannot calibrate.
+wrong. Run `jev validate` before trusting `rerank` on a new repo, and check a convention or
+gate against files whose answer you verified by hand. Without that step you are reading
+probabilities you cannot calibrate.
 
 ## Why the config is per-project
 
@@ -95,9 +117,9 @@ exemptions, and the same question needs different phrasing in different codebase
 `hardcoded_copy` criteria that works in an i18next app is wrong in an app with no i18n at
 all. Keep `jev.config.json` in the repo it describes and tune it there.
 
-The validation step is per-project too, and it needs ground truth. A repo with a meaningful
-commit history gives you that for free: use a commit message as the task, the files it
-changed as the answer. Without that, you are guessing at recall.
+The validation step is per-project too, which is what `jev validate` is for: a repo with a
+meaningful commit history carries its own ground truth. A shallow clone or a squashed history
+gives it nothing to work with, and there you are guessing at recall.
 
 ## When not to use this
 
