@@ -1,5 +1,5 @@
 {
-  "description": "React 19 + TanStack Router/Query admin app, Tailwind 4, zustand, i18next",
+  "description": "REPLACE ME: one line on what this app is and what it is built with. Jev sees this as context for every question, so name the libraries your conventions below refer to.",
   "include": ["src/**/*.ts", "src/**/*.tsx"],
   "batchSize": 60,
   "topN": 20,

@@ -42,17 +42,19 @@ directory is always the repo being judged, never the skill directory.
 Scores every tracked file for relevance to a task, prints the top N. Use at the start of
 work in a repo you do not know by heart, to find the files worth reading.
 
-Measured on a 705-file React app, task taken from a real commit message, ground truth from
-what that commit actually changed: **recall@20 5/7, recall@40 6/7**. One call per 60 files,
-~16s and ~93k input tokens for the full repo.
+Measured on one private 705-file React app, 10 consecutive commits as tasks, ground truth from
+what each commit actually changed: **recall@20 0.68, recall@40 0.80** over 41 files. One call
+per 60 files, ~16s and ~93k input tokens for the full repo.
 
 It earns its keep on files that share no keyword with the task. In that test,
-`src/services/upload.ts` ranked 6th for an image-upload task in an unrelated feature — a
-cross-layer file that grep on either `questionnaire` or `upload` would have missed or buried.
+a shared upload service ranked 6th for an image-upload task in an unrelated feature — a
+cross-layer file that grep on either feature name or `upload` would have missed or buried.
 
 **Where it fails:** files changed only because a reference changed rank low (one ground-truth
-file landed at 121/705). Semantic scoring cannot see structural coupling. Always follow the
-imports of the top results before assuming the list is complete.
+file landed at 121/705). Semantic scoring cannot see structural coupling, and it shows up as a
+size effect: in that run every task touching 1–4 files scored full marks, while an 11-file
+change reached 5/11. Treat the top 20 as the core of a change, never the whole of it, and
+follow the imports of those files before assuming the list is complete.
 
 Run once per task, not per edit. 16s is fine at the start of work and wrong inside a loop.
 

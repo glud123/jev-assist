@@ -88,10 +88,10 @@ are the answer. `validate` replays the last n commits, ranks the whole repo agai
 subject line, and prints recall at each cutoff.
 
 ```
-  #  task                                    truth   @20   @40
-  1  fix avatar upload failing on Safari              7     5     6
-  2  add CSV export to the orders table          4     4     4
-  3  bump deps and fix lint                     12     2     3
+  #  task                                 truth   @20   @40
+  1  fix avatar upload failing on Safari      7     5     6
+  2  add CSV export to the orders table       4     4     4
+  3  bump deps and fix lint                  12     2     3
 
   recall@20 0.48   recall@40 0.57   (23 files over 3 commits)
   worst: "bump deps and fix lint" — 2/12
@@ -104,15 +104,18 @@ Two things `validate` handles that a hand-rolled comparison gets wrong. Files a 
 **added** are excluded — they did not exist when the task was written, so counting them
 inflates recall. Files it **deleted** are gone from today's tree and cannot be ranked at all.
 
-Measured this way on one private 705-file React app:
+Measured on one private 705-file React app, 10 consecutive commits, 41 ground-truth files:
 
-- **rerank** — recall@20 5/7, recall@40 6/7. Best case: `src/services/upload.ts` ranked 6th
-  for an image-upload task in an unrelated feature, a cross-layer file grep would have missed. Worst case: a file
-  changed only by reference landed at 121/705.
+- **rerank** — recall@20 0.68, recall@40 0.80. Recall tracks change size: every commit
+  touching 1–4 files scored full marks, while the largest (11 files) reached 5/11. The top 20
+  reliably surfaces the core of a change and misses its periphery.
 - **gate** — 0.99 on a decryption feature, 0.91 on a swallowed error, ≤0.64 on a CSS tweak,
   ≤0.03 on a comment-only change. 745–1770ms per diff.
-- **drift** — 0.97 and 0.62 on two files importing a UI library inconsistently, where 0.62 correctly
-  described a file mixing both import styles. 231–953ms per file.
+- **drift** — 0.97 and 0.62 on two files importing a UI library inconsistently, where 0.62
+  correctly described a file mixing both import styles. 231–953ms per file.
+
+One repo is one data point, and a favourable one: these commit subjects name a scope and a
+behaviour. A history of `fix bug` and `update` gives `rerank` far less to work with.
 
 Run `validate` before trusting `drift` or `gate` on a new repo too. It only scores `rerank`,
 but a repo where `rerank` reads low is one where the config's phrasing needs work first.
