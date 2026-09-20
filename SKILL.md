@@ -16,9 +16,24 @@ where the pool is small.
 
 ## Setup
 
-Needs `JEV_API_KEY` in the environment and a `jev.config.json` in the repo root
-(copy `jev.config.example.json`). Conventions and gates are per-project on purpose —
-see "Why the config is per-project" below.
+Needs `JEV_API_KEY` in the environment and a `jev.config.json` in the repo root. The example
+config ships next to this file — copy it into the repo being judged:
+
+```sh
+cp "$SKILL_DIR/jev.config.example.json" jev.config.json   # then edit
+```
+
+Conventions and gates are per-project on purpose — see "Why the config is per-project" below.
+
+**Invoking the CLI.** `jev` is on PATH only after `npm link`. Installed as a skill it is not,
+so run the script by path from the repo you are judging:
+
+```sh
+node "$SKILL_DIR/scripts/jev.mjs" validate 20
+```
+
+`$SKILL_DIR` is this file's directory. Below, `jev` is shorthand for that command; the working
+directory is always the repo being judged, never the skill directory.
 
 ## The commands
 

@@ -17,10 +17,18 @@ asking one does — which is what makes whole-repo passes practical.
 
 ## Install
 
+As an agent skill, into the repo you want to judge:
+
 ```sh
-git clone <this repo> && cd jev-assist
-npm link                      # exposes `jev`; or call scripts/jev.mjs directly
+npx skills add glud123/jev-assist
 export JEV_API_KEY=...        # from typesafe.ai
+```
+
+Your agent then reads `SKILL.md` and calls the script by path. To also get a `jev` command in
+your own shell:
+
+```sh
+git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
 ```
 
 Node 18+ (uses built-in `fetch`). No dependencies.
@@ -29,7 +37,7 @@ Node 18+ (uses built-in `fetch`). No dependencies.
 
 ```sh
 cd /path/to/your/repo
-cp /path/to/jev-assist/jev.config.example.json jev.config.json   # then edit
+cp .claude/skills/jev-assist/jev.config.example.json jev.config.json   # then edit
 jev validate 20                                                   # start here: is it accurate?
 jev rerank "add CSV export to the orders table"
 jev drift 'src/**/*.tsx'
