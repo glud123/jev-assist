@@ -2,7 +2,7 @@
 // Run: node test/config.test.mjs   (no framework, no network)
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { exempt, bar, truthFrom, recallAt, configProblems, provider, keyPath } from '../scripts/jev.mjs';
+import { exempt, bar, truthFrom, recallAt, configProblems, provider, keyPath, pathspec } from '../scripts/jev.mjs';
 
 const cfg = JSON.parse(readFileSync(new URL('../jev.config.example.json', import.meta.url), 'utf8'));
 
@@ -90,6 +90,14 @@ assert.equal(custom.model, 'jev-pinned');
 // overriding only the model must keep the prefix-derived URL — this is how a version gets pinned
 assert.equal(provider('sk-or-v1-abc', { JEV_MODEL: 'typesafe/jev-1.13' }).url, 'https://openrouter.ai/api/alpha/decisions');
 assert.equal(provider('sk-or-v1-abc', { JEV_MODEL: 'typesafe/jev-1.13' }).model, 'typesafe/jev-1.13');
+
+// pathspec: `git ls-files src/**/*.ts` skips src/main.ts, because pathspecs are not globs by
+// default — ** wants an intervening directory. The :(glob) prefix is what makes them behave.
+assert.equal(pathspec('src/**/*.ts'), ':(glob)src/**/*.ts');
+assert.equal(pathspec('**/*.tsx'), ':(glob)**/*.tsx');
+// magic the caller already supplied must survive untouched, not get double-prefixed
+assert.equal(pathspec(':(glob)src/**/*.ts'), ':(glob)src/**/*.ts');
+assert.equal(pathspec(':!src/generated/'), ':!src/generated/');
 
 // keyPath: outside the repo, and honouring XDG when set — a key in the tree gets committed
 assert.equal(keyPath({ XDG_CONFIG_HOME: '/tmp/xdg' }), '/tmp/xdg/jev/key');

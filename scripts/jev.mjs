@@ -77,7 +77,13 @@ async function config() {
 }
 
 const git = async (args) => (await exec('git', args, { maxBuffer: 1 << 28 })).stdout;
-const tracked = async (globs) => (await git(['ls-files', ...globs])).trim().split('\n').filter(Boolean);
+
+// `git ls-files` pathspecs are NOT globs: by default `**` needs an intervening directory, so
+// `src/**/*.ts` silently skips `src/main.ts`. The `:(glob)` prefix gives real glob semantics.
+// Left alone if the caller already supplied pathspec magic.
+export const pathspec = (p) => (p.startsWith(':') ? p : `:(glob)${p}`);
+const tracked = async (globs) =>
+  (await git(['ls-files', ...globs.map(pathspec)])).trim().split('\n').filter(Boolean);
 
 // Exemptions are per-convention path substrings: a flag on an exempt path is dropped.
 export const exempt = (cfg, key, path) => (cfg.exemptions?.[key] ?? []).some((frag) => path.includes(frag));
@@ -139,9 +145,22 @@ async function check() {
     console.log(`\n  key ${k.slice(0, 6)}…${k.slice(-4)}  provider ${p.name} → ${p.url} (model ${p.model})`);
   }
 
-  const problems = configProblems(await config());
+  const cfg = await config();
+  const problems = configProblems(cfg);
+
+  // An include glob matching nothing is the one fault that wastes money quietly: rerank and
+  // drift score an empty pool and report success. Counting is the only way to see it.
+  const globs = Array.isArray(cfg.include) ? cfg.include : [];
+  const hits = new Set(); // a Set, because overlapping globs would otherwise be counted twice
+  for (const g of globs) {
+    const found = await tracked([g]);
+    if (!found.length) problems.push(`include: "${g}" matches no tracked file`);
+    for (const f of found) hits.add(f);
+  }
+  const matched = hits.size;
+
   if (!problems.length) {
-    console.log('\n  jev.config.json is well-formed.');
+    console.log(`\n  jev.config.json is well-formed. include matches ${matched} tracked file(s).`);
     console.log('  Shape only — run `jev validate` and read the questions yourself before trusting them.');
     if (!k) process.exitCode = 1;
     return;
@@ -190,7 +209,7 @@ async function score(task, files, cfg, quiet) {
 async function rerank(task) {
   if (!task) die('rerank needs a task description');
   const cfg = await config();
-  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
   const { rows, ms, tokens } = await score(task, files, cfg);
   const top = rows.slice(0, cfg.topN ?? 20);
   console.log(`\n${files.length} files, ${ms}ms, ${tokens} input tokens\n`);
@@ -223,7 +242,7 @@ async function validate(n) {
   const count = Number(n ?? 10);
   if (!Number.isInteger(count) || count < 1) die('validate needs a positive commit count');
   const cfg = await config();
-  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
   const rankable = new Set(files);
   const ks = cfg.validateK ?? [20, 40];
 
@@ -281,7 +300,7 @@ async function drift(glob) {
   const cfg = await config();
   const convs = Object.entries(cfg.conventions ?? {});
   if (!convs.length) die('jev.config.json has no conventions');
-  const files = await tracked(glob ? [glob] : (cfg.include ?? ['*.ts', '*.tsx']));
+  const files = await tracked(glob ? [glob] : (cfg.include ?? ['**/*.ts', '**/*.tsx']));
   const questions = Object.fromEntries(
     convs.map(([k, c]) => [k, { type: 'noul', instructions: c.ask, criteria: { true: c.drift, false: c.ok } }])
   );
