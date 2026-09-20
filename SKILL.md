@@ -16,12 +16,61 @@ where the pool is small.
 
 ## Setup
 
-Needs `JEV_API_KEY` in the environment and a `jev.config.json` in the repo root. The example
-config ships next to this file — copy it into the repo being judged:
+Needs an API key and a `jev.config.json` in the repo root.
+
+**The key.** If the user hands you a key, store it for them — do not ask them to run `export`:
 
 ```sh
-cp "$SKILL_DIR/jev.config.example.json" jev.config.json   # then edit
+jev key sk-or-v1-...
 ```
+
+It lands in `~/.config/jev/key` at 0600 (`$XDG_CONFIG_HOME` honoured), outside the repo, because
+a key in the working tree eventually gets committed. `JEV_API_KEY` in the environment still wins
+when set. Never paste a key into `jev.config.json`, a shell rc file, or any tracked file, and
+never echo it back in full — `jev key` prints it masked.
+
+The provider is derived from the key: one starting `sk-or-` routes to OpenRouter's Decisions
+endpoint (`~typesafe/jev-latest`), anything else to TypeSafe direct (`jev-latest`). The
+`{state, model, questions}` body and `{answers}` response are identical either way, so nothing
+else changes. For a self-hosted gateway or a pinned version, set `JEV_API_URL` and `JEV_MODEL`;
+those override the derived values. `jev check` prints which provider is in play — read it before
+debugging a call, since a wrong-provider key fails as a plain 401.
+
+**The config.** If the repo has no `jev.config.json`, **write one, then hand it to the user to
+review** — do not copy the example across unedited. Its conventions name i18next, TanStack
+Query and `src/services`, and in a repo without those it asks three questions that cannot be
+true.
+
+Read `$SKILL_DIR/jev.config.example.json` for the shape, then derive the content from the repo:
+
+- **`description`** — one line on what the app is and which libraries the conventions below
+  name. Read the manifest (`package.json`, `go.mod`, `pyproject.toml`) rather than guessing.
+- **`include`** — globs covering the source the repo actually has. Confirm with
+  `git ls-files <glob> | wc -l`; a glob matching nothing makes `rerank` silently score zero files.
+- **`conventions`** — only rules this codebase actually follows, found by reading it: the
+  shared request wrapper, the state library, the i18n setup. A convention the repo never
+  adopted flags every file and teaches the user to ignore the output. Three or four real ones
+  beat ten aspirational ones. Anchor each `ask` to the concrete module (`the wrapper in
+  src/services`), never to a principle.
+- **`gates`** — the risks that fit this repo. `auth_or_crypto` and `data_loss` travel well;
+  name the actual surface (which module holds payments, what counts as PII here).
+- **`exemptions`** — path fragments for the places a convention is legitimately violated:
+  mocks, fixtures, the wrapper module itself.
+
+Then verify, in this order:
+
+```sh
+jev check         # shape: placeholders, empty groups, exemptions naming no convention
+jev drift         # a first pass — read the flags yourself before showing anyone
+jev validate 20   # is rerank accurate on this repo at all?
+```
+
+`jev check` is mechanical. It passes on a config asking confidently wrong questions, so it
+gates the handoff, it does not substitute for it. Run `drift` on a handful of files whose
+answer you already know: a convention that flags nearly everything or nothing is miscalibrated,
+and the fix is in the `ask`/`ok` text, not the threshold. Bring the user the config plus what
+that pass found, and say which conventions you inferred from reading code versus which you
+guessed — the guesses are what they should look at first.
 
 Conventions and gates are per-project on purpose — see "Why the config is per-project" below.
 

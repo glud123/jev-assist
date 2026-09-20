@@ -10,6 +10,8 @@ they hold on your repo:
 | `jev validate [n]` | Is rerank accurate enough **on my repo**? | n × rerank |
 | `jev drift [glob]` | Which files drifted from our conventions? | 1 call / file |
 | `jev gate [ref]` | Does this diff touch something dangerous? | 1 call / diff |
+| `jev check` | Is my key and config well-formed? | free, no network |
+| `jev key <k>` | Store an API key outside the repo | free, no network |
 
 Jev returns typed answers with probabilities instead of text. Output tokens are free and
 questions in one call are evaluated in parallel, so asking ten questions costs about what
@@ -21,8 +23,19 @@ As an agent skill, into the repo you want to judge:
 
 ```sh
 npx skills add glud123/jev-assist
-export JEV_API_KEY=...        # from typesafe.ai
 ```
+
+Then hand your agent an API key and ask it to set things up — it stores the key and writes the
+config for you. Or do it yourself:
+
+```sh
+jev key sk-...        # → ~/.config/jev/key, 0600, outside the repo
+```
+
+A key from [typesafe.ai](https://typesafe.ai) goes direct; an OpenRouter key (`sk-or-...`) is
+detected by prefix and routed to its Decisions endpoint. Bodies are identical either way, so
+nothing else changes. `JEV_API_KEY` still works and takes precedence; `JEV_API_URL` +
+`JEV_MODEL` point at a self-hosted gateway or pin a version.
 
 Your agent then reads `SKILL.md` and calls the script by path. To also get a `jev` command in
 your own shell:
@@ -37,7 +50,7 @@ Node 18+ (uses built-in `fetch`). No dependencies.
 
 ```sh
 cd /path/to/your/repo
-cp .claude/skills/jev-assist/jev.config.example.json jev.config.json   # then edit
+jev check                                                         # key + config, before anything else
 jev validate 20                                                   # start here: is it accurate?
 jev rerank "add CSV export to the orders table"
 jev drift 'src/**/*.tsx'
@@ -55,6 +68,12 @@ echo 'jev gate || exit 1' >> .git/hooks/pre-commit && chmod +x .git/hooks/pre-co
 
 `jev.config.json` lives in the repo being judged, not here. Conventions and gates are
 project-specific: the phrasing that works in an i18next app is wrong in an app without i18n.
+
+Let your agent write the first draft — it has read the code, and `SKILL.md` tells it what to
+derive from where. Then review it: `jev check` catches the mechanical faults (placeholders,
+empty groups, exemptions naming no convention), but a config can pass it and still ask
+confidently wrong questions. Ask the agent which conventions it inferred from reading code and
+which it guessed; the guesses are where to look.
 
 ```jsonc
 {
