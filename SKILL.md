@@ -105,6 +105,15 @@ size effect: in that run every task touching 1–4 files scored full marks, whil
 change reached 5/11. Treat the top 20 as the core of a change, never the whole of it, and
 follow the imports of those files before assuming the list is complete.
 
+**Reading the list:** `topN` is a fixed row count, not a relevance filter. A task touching 3
+files still prints 20 rows, and the rest are the least unrelated files in the repo rather than
+candidates. Cut at the gap in the scores — they are a distribution over four levels from
+"no reason to open this file" to "likely must be read or edited", so 0.3 means background.
+
+Stdout is the interface; nothing is written to disk. Add `--json` only if you need the ranking
+past the cutoff, which also dumps every row to `.jev-rerank.json` in the repo root — tell the
+user to gitignore it if they do not already.
+
 Run once per task, not per edit. 16s is fine at the start of work and wrong inside a loop.
 
 ### `jev validate [n]` — before trusting any of this on a new repo

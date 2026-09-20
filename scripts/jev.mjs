@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // jev-assist — typed judgments over a codebase, via TypeSafe Jev.
-//   rerank "<task>"   score every tracked file for relevance to a task
+//   rerank "<task>"   score every tracked file for relevance to a task (--json to dump the full ranking)
 //   drift [glob]      scan files for convention drift
 //   gate [ref]        judge a diff for risks linters cannot see
 //   validate [n]      measure rerank recall against your own commit history
@@ -206,7 +206,7 @@ async function score(task, files, cfg, quiet) {
   return { rows, ms, tokens };
 }
 
-async function rerank(task) {
+async function rerank(task, json) {
   if (!task) die('rerank needs a task description');
   const cfg = await config();
   const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
@@ -218,7 +218,12 @@ async function rerank(task) {
     '\n  Ranking is semantic, not exhaustive: files changed only by reference tend to rank low.\n' +
       '  Follow the imports of these before assuming the list is complete.'
   );
-  await writeFile('.jev-rerank.json', JSON.stringify(rows, null, 1));
+  // The printed top N is the whole point; the full ranking is only worth a file when
+  // something will read past the cutoff. Opt in with --json.
+  if (json) {
+    await writeFile('.jev-rerank.json', JSON.stringify(rows, null, 1));
+    console.log('  Full ranking written to .jev-rerank.json');
+  }
 }
 
 // ---------------------------------------------------------------- validate
@@ -351,8 +356,10 @@ async function gate(ref) {
 
 // Only dispatch when run as a CLI, so tests can import the helpers above.
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const [cmd, arg] = process.argv.slice(2);
+  const argv = process.argv.slice(2);
+  const json = argv.includes('--json');
+  const [cmd, arg] = argv.filter((a) => a !== '--json');
   const cmds = { rerank, drift, gate, validate, check, key };
-  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate|check|key> [arg]');
-  await cmds[cmd](arg);
+  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate|check|key> [arg] [--json]');
+  await cmds[cmd](arg, json);
 }
