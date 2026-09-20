@@ -4,28 +4,62 @@
 //   drift [glob]      scan files for convention drift
 //   gate [ref]        judge a diff for risks linters cannot see
 //   validate [n]      measure rerank recall against your own commit history
+//   check             verify the stored key and the config's shape, offline
+//   key <API_KEY>     store a key outside the repo at 0600
 // Conventions and exemptions come from jev.config.json in the repo root.
 // ponytail: sequential calls, no backoff. Add p-limit + 429 retry when pools exceed ~50 batches.
-import { readFile, writeFile } from 'node:fs/promises';
+import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
+import { homedir } from 'node:os';
+import { join, dirname } from 'node:path';
 
 const exec = promisify(execFile);
-const API = 'https://api.typesafe.ai/v1/systemone';
-const KEY = process.env.JEV_API_KEY;
 
 const die = (msg) => {
   console.error(`jev: ${msg}`);
   process.exit(1);
 };
 
+// ---------------------------------------------------------------- provider
+// Several providers serve Jev. OpenRouter exposes it on its own Decisions endpoint, but the
+// {state, model, questions} body and the {answers} response are byte-identical to direct — so
+// only the URL, the key and the model id differ, making this a lookup rather than a translation
+// layer. OpenRouter keys are recognisable by prefix; anything else is treated as direct.
+// OpenRouter's optional HTTP-Referer / X-OpenRouter-Title ranking headers are skipped: a CLI
+// has no site to rank. A provider that ever diverges in body shape needs a real adapter here.
+export const provider = (key, env = {}) => {
+  const or = key.startsWith('sk-or-');
+  return {
+    name: env.JEV_API_URL ? 'custom' : or ? 'openrouter' : 'typesafe',
+    url: env.JEV_API_URL ?? (or ? 'https://openrouter.ai/api/alpha/decisions' : 'https://api.typesafe.ai/v1/systemone'),
+    // `~` marks OpenRouter's floating alias, matching `jev-latest` direct. Pin with JEV_MODEL.
+    model: env.JEV_MODEL ?? (or ? '~typesafe/jev-latest' : 'jev-latest'),
+  };
+};
+
+// Stored outside the repo: a key in the working tree gets committed sooner or later.
+export const keyPath = (env = process.env) =>
+  join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'jev', 'key');
+
+async function apiKey() {
+  if (process.env.JEV_API_KEY?.trim()) return process.env.JEV_API_KEY.trim();
+  try {
+    return (await readFile(keyPath(), 'utf8')).trim() || null;
+  } catch {
+    return null;
+  }
+}
+
 async function ask(state, questions) {
-  if (!KEY) die('JEV_API_KEY is not set');
+  const key = await apiKey();
+  if (!key) die(`no API key. Run \`jev key <API_KEY>\`, or set JEV_API_KEY (looked in ${keyPath()})`);
+  const p = provider(key, process.env);
   const t0 = performance.now();
-  const res = await fetch(API, {
+  const res = await fetch(p.url, {
     method: 'POST',
-    headers: { authorization: `Bearer ${KEY}`, 'content-type': 'application/json' },
-    body: JSON.stringify({ state, model: 'jev-latest', questions }),
+    headers: { authorization: `Bearer ${key}`, 'content-type': 'application/json' },
+    body: JSON.stringify({ state, model: p.model, questions }),
   });
   const ms = Math.round(performance.now() - t0);
   const body = await res.text();
@@ -43,12 +77,98 @@ async function config() {
 }
 
 const git = async (args) => (await exec('git', args, { maxBuffer: 1 << 28 })).stdout;
-const tracked = async (globs) => (await git(['ls-files', ...globs])).trim().split('\n').filter(Boolean);
+
+// `git ls-files` pathspecs are NOT globs: by default `**` needs an intervening directory, so
+// `src/**/*.ts` silently skips `src/main.ts`. The `:(glob)` prefix gives real glob semantics.
+// Left alone if the caller already supplied pathspec magic.
+export const pathspec = (p) => (p.startsWith(':') ? p : `:(glob)${p}`);
+const tracked = async (globs) =>
+  (await git(['ls-files', ...globs.map(pathspec)])).trim().split('\n').filter(Boolean);
 
 // Exemptions are per-convention path substrings: a flag on an exempt path is dropped.
 export const exempt = (cfg, key, path) => (cfg.exemptions?.[key] ?? []).some((frag) => path.includes(frag));
 
 export const bar = (p) => (p >= 0.7 ? '!' : p >= 0.4 ? '?' : ' ');
+
+// ---------------------------------------------------------------- check
+// Shape only. A config can pass every line here and still ask the wrong questions —
+// that is what the human review and `jev validate` are for.
+export function configProblems(cfg) {
+  const out = [];
+  if (typeof cfg.description !== 'string' || cfg.description.length < 20)
+    out.push('description: missing, or too short to orient the model');
+  if (/REPLACE ME/i.test(cfg.description ?? '')) out.push('description: still the template placeholder');
+  if (!Array.isArray(cfg.include) || !cfg.include.length) out.push('include: must be a non-empty array of globs');
+
+  for (const group of ['conventions', 'gates']) {
+    const entries = Object.entries(cfg[group] ?? {});
+    if (!entries.length) out.push(`${group}: empty, so those checks do nothing`);
+    const flag = group === 'conventions' ? 'drift' : 'risk';
+    for (const [key, v] of entries) {
+      for (const f of ['ask', flag, 'ok']) {
+        if (typeof v?.[f] !== 'string' || v[f].length <= 10)
+          out.push(`${group}.${key}.${f}: missing, or too short to steer the model`);
+      }
+      if (typeof v?.ask === 'string' && !v.ask.includes('?'))
+        out.push(`${group}.${key}.ask: must be phrased as a question`);
+    }
+  }
+
+  for (const key of Object.keys(cfg.exemptions ?? {}))
+    if (!cfg.conventions?.[key]) out.push(`exemptions.${key}: names no convention, so it silently does nothing`);
+
+  return out;
+}
+
+// ---------------------------------------------------------------- key
+// Takes the key as an argument so an agent can store it for the user in one call. It lands
+// outside the repo (never in the working tree) and 0600, and is echoed back masked.
+async function key(value) {
+  const k = value?.trim();
+  if (!k) die('usage: jev key <API_KEY>   (stores it outside the repo, 0600)');
+  if (k.length < 12) die('that does not look like an API key');
+  const path = keyPath();
+  await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+  await writeFile(path, `${k}\n`, { mode: 0o600 });
+  await chmod(path, 0o600);
+  const p = provider(k, process.env);
+  console.log(`\n  stored ${k.slice(0, 6)}…${k.slice(-4)} in ${path} (0600)`);
+  console.log(`  provider: ${p.name}  →  ${p.url}  (model ${p.model})`);
+  console.log('  JEV_API_KEY in the environment still wins if set.');
+}
+
+async function check() {
+  const k = await apiKey();
+  if (!k) console.log(`\n  no API key — run \`jev key <API_KEY>\` (looked in ${keyPath()})`);
+  else {
+    const p = provider(k, process.env);
+    console.log(`\n  key ${k.slice(0, 6)}…${k.slice(-4)}  provider ${p.name} → ${p.url} (model ${p.model})`);
+  }
+
+  const cfg = await config();
+  const problems = configProblems(cfg);
+
+  // An include glob matching nothing is the one fault that wastes money quietly: rerank and
+  // drift score an empty pool and report success. Counting is the only way to see it.
+  const globs = Array.isArray(cfg.include) ? cfg.include : [];
+  const hits = new Set(); // a Set, because overlapping globs would otherwise be counted twice
+  for (const g of globs) {
+    const found = await tracked([g]);
+    if (!found.length) problems.push(`include: "${g}" matches no tracked file`);
+    for (const f of found) hits.add(f);
+  }
+  const matched = hits.size;
+
+  if (!problems.length) {
+    console.log(`\n  jev.config.json is well-formed. include matches ${matched} tracked file(s).`);
+    console.log('  Shape only — run `jev validate` and read the questions yourself before trusting them.');
+    if (!k) process.exitCode = 1;
+    return;
+  }
+  console.log(`\n  ${problems.length} problem(s):`);
+  for (const p of problems) console.log(`    - ${p}`);
+  process.exitCode = 1;
+}
 
 // ---------------------------------------------------------------- rerank
 const LEVELS = [
@@ -89,7 +209,7 @@ async function score(task, files, cfg, quiet) {
 async function rerank(task) {
   if (!task) die('rerank needs a task description');
   const cfg = await config();
-  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
   const { rows, ms, tokens } = await score(task, files, cfg);
   const top = rows.slice(0, cfg.topN ?? 20);
   console.log(`\n${files.length} files, ${ms}ms, ${tokens} input tokens\n`);
@@ -122,7 +242,7 @@ async function validate(n) {
   const count = Number(n ?? 10);
   if (!Number.isInteger(count) || count < 1) die('validate needs a positive commit count');
   const cfg = await config();
-  const files = await tracked(cfg.include ?? ['*.ts', '*.tsx']);
+  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
   const rankable = new Set(files);
   const ks = cfg.validateK ?? [20, 40];
 
@@ -180,7 +300,7 @@ async function drift(glob) {
   const cfg = await config();
   const convs = Object.entries(cfg.conventions ?? {});
   if (!convs.length) die('jev.config.json has no conventions');
-  const files = await tracked(glob ? [glob] : (cfg.include ?? ['*.ts', '*.tsx']));
+  const files = await tracked(glob ? [glob] : (cfg.include ?? ['**/*.ts', '**/*.tsx']));
   const questions = Object.fromEntries(
     convs.map(([k, c]) => [k, { type: 'noul', instructions: c.ask, criteria: { true: c.drift, false: c.ok } }])
   );
@@ -232,7 +352,7 @@ async function gate(ref) {
 // Only dispatch when run as a CLI, so tests can import the helpers above.
 if (import.meta.url === `file://${process.argv[1]}`) {
   const [cmd, arg] = process.argv.slice(2);
-  const cmds = { rerank, drift, gate, validate };
-  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate> [arg]');
+  const cmds = { rerank, drift, gate, validate, check, key };
+  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate|check|key> [arg]');
   await cmds[cmd](arg);
 }
