@@ -1,0 +1,48 @@
+{
+  "description": "React 19 + TanStack Router/Query admin app, Tailwind 4, zustand, i18next",
+  "include": ["src/**/*.ts", "src/**/*.tsx"],
+  "batchSize": 60,
+  "topN": 20,
+  "threshold": 0.7,
+
+  "conventions": {
+    "hardcoded_copy": {
+      "ask": "Does this file contain user-visible UI text inline instead of going through i18next translation keys?",
+      "drift": "has hardcoded user-visible copy",
+      "ok": "all user-visible copy is translated, or the file has no UI text. Mock data, fixtures, chart demo series, and developer-only strings do not count."
+    },
+    "raw_fetch": {
+      "ask": "Does this file call fetch or axios directly instead of going through the shared request wrapper in src/services?",
+      "drift": "bypasses the shared request layer",
+      "ok": "uses the shared layer, or makes no HTTP call"
+    },
+    "server_state_in_store": {
+      "ask": "Does this file keep server-fetched data in zustand or useState where TanStack Query would be the fit?",
+      "drift": "server state held outside TanStack Query",
+      "ok": "uses Query, or holds only UI state"
+    }
+  },
+
+  "gates": {
+    "auth_or_crypto": {
+      "ask": "Does this change touch authentication, authorization, permissions, encryption, decryption, or personal contact data (phone/email)?",
+      "risk": "security- or PII-sensitive code is modified",
+      "ok": "no security or PII surface is touched"
+    },
+    "data_loss": {
+      "ask": "Could this change lose or silently discard user-entered data, for example a save path that drops edits or a state reset that wipes in-progress input?",
+      "risk": "a realistic path exists where user input is lost",
+      "ok": "user data is preserved on every path"
+    },
+    "silent_catch": {
+      "ask": "Does this change swallow an error without surfacing it to the user or logging it?",
+      "risk": "an error is caught and discarded silently",
+      "ok": "errors surface or are logged, OR the catch is accompanied by a comment explaining why the failure is safe to ignore"
+    }
+  },
+
+  "exemptions": {
+    "hardcoded_copy": ["/mocks/", ".test.", "/__fixtures__/"],
+    "raw_fetch": ["src/services/request.ts"]
+  }
+}

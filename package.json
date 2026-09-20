@@ -1,0 +1,21 @@
+{
+  "name": "jev-assist",
+  "version": "0.1.0",
+  "description": "Typed judgments over a codebase via TypeSafe Jev: context preselection, convention drift, diff gating",
+  "type": "module",
+  "license": "MIT",
+  "bin": {
+    "jev": "scripts/jev.mjs"
+  },
+  "files": [
+    "scripts/",
+    "SKILL.md",
+    "jev.config.example.json"
+  ],
+  "scripts": {
+    "test": "node test/config.test.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
