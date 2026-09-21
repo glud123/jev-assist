@@ -37,6 +37,21 @@ node "/absolute/path/to/jev-assist/scripts/jev.mjs" validate 20
 Below, `jev` is shorthand for that command. The working directory is always the repo being
 judged, never the skill directory.
 
+## What the script touches and sends
+
+`scripts/jev.mjs` is the only code this skill runs — one ~370-line file, zero npm
+dependencies, maintained at github.com/glud123/jev-assist where every change sits in the
+git history. Its side-effect surface is greppable in a minute: exactly one `fetch` (in
+`ask()`, to the endpoint the key prefix selects — the provider table in Setup — or
+`JEV_API_URL`); `execFile` spawns only `git`; no `eval`, no dynamic imports. The only
+writes are the key file, stored outside every repo at 0600, and `.jev-rerank.json` in the
+repo root when `rerank --json` opts into it.
+
+What leaves the machine: `rerank` sends file paths, the config's `description` and the
+task text; `drift` sends each file's contents; `gate` sends the diff. Every call carries
+the API key. That is the tool working, not a leak — if a repo must not leave the machine,
+do not point jev at it.
+
 ## Setup
 
 Requires an API key plus `jev.config.json` in the repo root.
