@@ -26,7 +26,8 @@ jev-assist 把这类判断交给 [TypeSafe Jev](https://docs.typesafe.ai)——�
 最后跑 jev check 和 jev validate 20，把结果和你推断出的约定一起给我看。
 ```
 
-它读过你的代码，`SKILL.md` 也写清了每一项该从哪儿推，配置的第一版交给它比你手写快。
+它读过你的代码，`SKILL.md` 也写清了每一项该从哪儿推，配置的第一版交给它比你手写快。发这段之前先把
+密钥拿到手——没有密钥 agent 会停在第一步，因为所有要调 API 的命令都会失败。
 
 **手动装。**
 
@@ -44,6 +45,25 @@ Code、Codex、Cursor 读的是同一份 `SKILL.md`，按路径调脚本。
 
 ```sh
 git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
+```
+
+**卸载。** 只删 skill 不够——安装时写进去的密钥、配置，还有可能装上的 pre-commit hook，都在 skill
+目录之外，而一个调 `jev gate` 的 hook 在脚本没了之后会让每次提交都失败。把下面这段发给 agent，完整
+清单在 `SKILL.md` 里：
+
+```
+按 jev-assist 的 SKILL.md 里 Uninstall 那节把这个 skill 卸载掉：pre-commit hook、存下来的
+密钥、所有 JEV_ 环境变量、每个仓库里的配置和产出，以及 skill 本身。不确定的先给我看再删。
+```
+
+手动：
+
+```sh
+rm -f .git/hooks/pre-commit              # 仅当它里面只有 `jev gate`
+rm -f ~/.config/jev/key                  # 每台机器一份（设了 $XDG_CONFIG_HOME 就在那下面）
+rm -f jev.config.json .jev-rerank.json   # 每个被判断的仓库一份，在它的根目录执行
+grep -rn JEV_ ~/.zshrc ~/.bashrc .env    # 留在 rc 文件里的密钥仍然是活的
+npm unlink -g jev-assist                 # 仅当你跑过 npm link
 ```
 
 ## 在 agent 会话里怎么用

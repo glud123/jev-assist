@@ -32,7 +32,9 @@ conventions you inferred from reading code versus which ones you guessed.
 ```
 
 It has read your code, and `SKILL.md` tells it what to derive from where, so the first draft of
-the config comes faster from the agent than from you.
+the config comes faster from the agent than from you. Get the key before you send the prompt —
+without one the agent stops at the first step, because every command that reaches the API fails
+without it.
 
 **Manual install.**
 
@@ -52,6 +54,26 @@ shell:
 
 ```sh
 git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
+```
+
+**Uninstall.** Deleting the skill is not enough — the setup writes a key, a config and possibly a
+pre-commit hook, all outside the skill directory, and a hook calling `jev gate` breaks every
+commit once the script is gone. Hand an agent this prompt and `SKILL.md` gives it the full list:
+
+```
+Uninstall the jev-assist skill following the Uninstall section of its SKILL.md: remove the
+pre-commit hook, the stored key, any JEV_ environment variables, the per-repo config and
+output, and the skill itself. Show me anything you are unsure about before deleting it.
+```
+
+By hand:
+
+```sh
+rm -f .git/hooks/pre-commit              # only if `jev gate` is all it contains
+rm -f ~/.config/jev/key                  # per machine ($XDG_CONFIG_HOME/jev/key if set)
+rm -f jev.config.json .jev-rerank.json   # per judged repo, from its root
+grep -rn JEV_ ~/.zshrc ~/.bashrc .env    # a key left in a rc file is still a live key
+npm unlink -g jev-assist                 # only if you ran npm link
 ```
 
 ## Using it in an agent session

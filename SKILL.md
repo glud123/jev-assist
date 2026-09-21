@@ -41,6 +41,14 @@ judged, never the skill directory.
 
 Requires an API key plus `jev.config.json` in the repo root.
 
+**Key first, and stop for it.** If the user has not given you a key and none is stored
+(`jev check` says `no API key`), ask for it and wait. Do not write the config, do not run
+`validate`, do not proceed with the surrounding task — every command that calls the API fails
+without a key, so any work you do first is work you did not need to do yet. One question up
+front beats a finished task that ends in "now paste your key".
+
+Everything else you can derive by reading the repo. The key you cannot.
+
 ### Key
 
 ```sh
@@ -109,6 +117,32 @@ handoff, it does not substitute for it. Run `drift` against a handful of files w
 already know — a convention flagging nearly everything or nothing is miscalibrated. Hand the user
 the config plus what that pass found, and state which conventions you inferred from reading code
 versus which you guessed. The guesses are what they should check first.
+
+### Uninstall
+
+Read this when the user asks to remove, uninstall or disable jev-assist. Deleting the skill
+directory is not enough: everything below was written outside it, and the hook actively breaks
+the repo once the script is gone.
+
+Work the list in order. Report what you removed and what you found nothing of.
+
+1. **The pre-commit hook, first.** A hook calling `jev gate` fails every commit once the script
+   is gone. Check `.git/hooks/pre-commit` and any Husky or pre-commit config (`.husky/`,
+   `.pre-commit-config.yaml`). Delete the hook only if `jev gate` is all it does; otherwise
+   remove that line and leave the rest.
+2. **The key.** `rm -f ~/.config/jev/key` (`$XDG_CONFIG_HOME/jev/key` when set), then
+   `rmdir ~/.config/jev` if empty. It is a credential — deleting it is the point, not a
+   courtesy. If the key is live and used elsewhere, say so rather than silently dropping it.
+3. **Environment variables.** Grep the user's shell rc files and any `.env` for `JEV_API_KEY`,
+   `JEV_API_URL`, `JEV_MODEL`. A `JEV_API_KEY` left in a rc file is an undeleted credential.
+   Show the lines and let the user remove them — do not edit a shell rc yourself.
+4. **Per-repo output**, in every repo the skill ran against: `rm -f .jev-rerank.json`, and
+   `jev.config.json` after showing it to the user. The config is hand-tuned and worth keeping if
+   they may reinstall.
+5. **`.gitignore`.** Drop the `jev.config.json` and `.jev-rerank.json` lines the setup added.
+6. **The command on PATH**, if `npm link` was ever run: `npm unlink -g jev-assist`. Check with
+   `which jev` — a dangling symlink is a confusing failure later.
+7. **The skill directory itself**, plus the entry in whatever registry installed it.
 
 ## `jev rerank "<task>"`
 
