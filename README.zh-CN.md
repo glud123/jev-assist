@@ -29,8 +29,9 @@ jev-assist 把这类判断交给 [TypeSafe Jev](https://docs.typesafe.ai)——�
 最后跑 jev check 和 jev validate 20，把结果和你推断出的约定一起给我看。
 ```
 
-它读过你的代码，`SKILL.md` 也写清了每一项该从哪儿推，配置的第一版交给它比你手写快。发这段之前先把
-密钥拿到手——没有密钥 agent 会停在第一步，因为所有要调 API 的命令都会失败。
+它读过你的代码，`SKILL.md` 也写清了每一项该从哪儿推，配置的第一版交给它比你手写快。发这段之前先去
+[console.typesafe.ai/keys](https://console.typesafe.ai/keys) 把密钥拿到手——没有密钥 agent 会停在
+第一步，因为所有要调 API 的命令都会失败。
 
 **手动装。**
 

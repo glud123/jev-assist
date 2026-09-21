@@ -35,9 +35,9 @@ conventions you inferred from reading code versus which ones you guessed.
 ```
 
 It has read your code, and `SKILL.md` tells it what to derive from where, so the first draft of
-the config comes faster from the agent than from you. Get the key before you send the prompt —
-without one the agent stops at the first step, because every command that reaches the API fails
-without it.
+the config comes faster from the agent than from you. Get the key first at
+[console.typesafe.ai/keys](https://console.typesafe.ai/keys) — without one the agent stops at
+the first step, because every command that reaches the API fails without it.
 
 **Manual install.**
 
