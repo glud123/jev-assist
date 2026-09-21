@@ -1,7 +1,7 @@
 // Self-check for the two pure helpers plus the shipped example config.
 // Run: node test/config.test.mjs   (no framework, no network)
 import assert from 'node:assert/strict';
-import { readFileSync, copyFileSync as copySync, mkdtempSync, rmSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, copyFileSync as copySync, mkdtempSync, rmSync } from 'node:fs';
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -125,6 +125,49 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   assert.equal(r.code, 1, 'CLI must dispatch from a spaced/symlinked path, not exit 0 silently');
   assert.match(r.err, /usage: jev/);
   rmSync(dir, { recursive: true, force: true });
+}
+
+// CLI git failures must die with the clean `jev:` line, not a raw Node unhandled-rejection
+// stack — outside a repo every command crashes at the first `git ls-files`, and `validate`
+// crashes on a zero-commit repo (`git log` fatal). Three install-time agents hit this in a
+// row. Needs a subprocess; each path reaches git() before anything else can fail first.
+{
+  const root = mkdtempSync(join(tmpdir(), 'jev-gitfail '));
+  const copy = join(root, 'jev.mjs');
+  copySync(new URL('../scripts/jev.mjs', import.meta.url), copy);
+  const config = JSON.stringify({
+    description: 'temporary config for a crash-path regression test',
+    include: ['**/*'],
+  });
+  const nogit = join(root, 'nogit');
+  mkdirSync(nogit);
+  writeFileSync(join(nogit, 'jev.config.json'), config);
+  const empty = join(root, 'empty-repo');
+  mkdirSync(empty);
+  writeFileSync(join(empty, 'jev.config.json'), config);
+  execFileSync('git', ['init', '-q'], { cwd: empty }); // zero commits on purpose
+
+  const run = (args, cwd) => {
+    try {
+      // XDG pointed inside the tree keeps the machine's stored key out of the run entirely
+      execFileSync(process.execPath, [copy, ...args], {
+        encoding: 'utf8', cwd, stdio: 'pipe',
+        env: { ...process.env, XDG_CONFIG_HOME: join(root, 'xdg') },
+      });
+      return { code: 0, err: '' };
+    } catch (e) {
+      return { code: e.status, err: e.stderr };
+    }
+  };
+  const clean = (r, label) => {
+    assert.equal(r.code, 1, `${label}: must exit 1`);
+    assert.match(r.err, /^jev: git .*failed: fatal: /m, `${label}: must die with the clean jev: line`);
+    assert.doesNotMatch(r.err, /^\s+at /m, `${label}: must not dump a stack`);
+    assert.doesNotMatch(r.err, /Node\.js v\d/, `${label}: must not crash as an unhandled rejection`);
+  };
+  clean(run(['check'], nogit), 'check outside a git repo');
+  clean(run(['validate'], empty), 'validate on a zero-commit repo');
+  rmSync(root, { recursive: true, force: true });
 }
 
 console.log('ok');

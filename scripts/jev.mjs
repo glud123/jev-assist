@@ -78,7 +78,16 @@ async function config() {
   }
 }
 
-const git = async (args) => (await exec('git', args, { maxBuffer: 1 << 28 })).stdout;
+// A git failure (outside a repo, zero-commit log, bad ref) must die with the clean `jev:` line,
+// not a raw unhandled rejection — the caller's exit code is right either way, the output is not.
+const git = async (args) => {
+  try {
+    return (await exec('git', args, { maxBuffer: 1 << 28 })).stdout;
+  } catch (e) {
+    // stderr is a Buffer here (execFile runs without an encoding); first line carries the cause
+    die(`git ${args[0]} failed: ${(e.stderr?.toString() || e.message).trim().split('\n')[0]}`);
+  }
+};
 
 // `git ls-files` pathspecs are NOT globs: by default `**` needs an intervening directory, so
 // `src/**/*.ts` silently skips `src/main.ts`. The `:(glob)` prefix gives real glob semantics.
