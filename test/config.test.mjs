@@ -1,7 +1,10 @@
 // Self-check for the two pure helpers plus the shipped example config.
 // Run: node test/config.test.mjs   (no framework, no network)
 import assert from 'node:assert/strict';
-import { readFileSync } from 'node:fs';
+import { readFileSync, copyFileSync as copySync, mkdtempSync, rmSync } from 'node:fs';
+import { execFileSync } from 'node:child_process';
+import { tmpdir } from 'node:os';
+import { join } from 'node:path';
 import { exempt, bar, truthFrom, recallAt, configProblems, provider, keyPath, pathspec } from '../scripts/jev.mjs';
 
 const cfg = JSON.parse(readFileSync(new URL('../jev.config.example.json', import.meta.url), 'utf8'));
@@ -102,5 +105,26 @@ assert.equal(pathspec(':!src/generated/'), ':!src/generated/');
 // keyPath: outside the repo, and honouring XDG when set — a key in the tree gets committed
 assert.equal(keyPath({ XDG_CONFIG_HOME: '/tmp/xdg' }), '/tmp/xdg/jev/key');
 assert.ok(keyPath({}).endsWith('/.config/jev/key'));
+
+// CLI dispatch: the guard compares import.meta.url to argv[1], and a naive `file://` concat made
+// every command a silent exit-0 no-op from a path with a space (skill dirs) or a symlink (npm
+// link's bin shim). Needs a subprocess; `bogus` hits the usage line before any config or network.
+{
+  const dir = mkdtempSync(join(tmpdir(), 'jev sp ')); // space in the name is the regression
+  const copy = join(dir, 'jev.mjs');
+  copySync(new URL('../scripts/jev.mjs', import.meta.url), copy);
+  const run = () => {
+    try {
+      execFileSync(process.execPath, [copy, 'bogus'], { encoding: 'utf8', stdio: 'pipe' });
+      return { code: 0, err: '' };
+    } catch (e) {
+      return { code: e.status, err: e.stderr };
+    }
+  };
+  const r = run();
+  assert.equal(r.code, 1, 'CLI must dispatch from a spaced/symlinked path, not exit 0 silently');
+  assert.match(r.err, /usage: jev/);
+  rmSync(dir, { recursive: true, force: true });
+}
 
 console.log('ok');

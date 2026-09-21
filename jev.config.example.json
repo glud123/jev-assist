@@ -4,6 +4,7 @@
   "batchSize": 60,
   "topN": 20,
   "threshold": 0.7,
+  "validateK": [20, 40],
 
   "conventions": {
     "hardcoded_copy": {

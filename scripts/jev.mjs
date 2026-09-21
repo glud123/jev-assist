@@ -9,10 +9,12 @@
 // Conventions and exemptions come from jev.config.json in the repo root.
 // ponytail: sequential calls, no backoff. Add p-limit + 429 retry when pools exceed ~50 batches.
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
+import { realpathSync } from 'node:fs';
 import { execFile } from 'node:child_process';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
+import { pathToFileURL } from 'node:url';
 
 const exec = promisify(execFile);
 
@@ -355,7 +357,10 @@ async function gate(ref) {
 }
 
 // Only dispatch when run as a CLI, so tests can import the helpers above.
-if (import.meta.url === `file://${process.argv[1]}`) {
+// import.meta.url is a percent-encoded realpath URL, so comparing it to `file://${argv[1]}` made
+// every command a silent no-op when the path held a space (skill dirs) or crossed a symlink (the
+// `npm link` bin shim, /tmp on macOS). realpathSync + pathToFileURL normalises both halves.
+if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
   const argv = process.argv.slice(2);
   const json = argv.includes('--json');
   const [cmd, arg] = argv.filter((a) => a !== '--json');
