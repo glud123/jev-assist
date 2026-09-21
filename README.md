@@ -2,6 +2,7 @@
 
 It finds the files grep can never find — the ones a task actually needs changed.
 
+[![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist)
 [中文](README.zh-CN.md)
 
 Starting a task in a 600-file repo, perhaps 8 of those files are worth reading. Finding the 8

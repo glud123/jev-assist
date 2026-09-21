@@ -2,6 +2,7 @@
 
 它找到 grep 搜不到、却真正该改的那些文件。
 
+[![skills.sh 安装量](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist)
 [English](README.md)
 
 在一个 600 文件的仓库里开始一个任务，真正需要读的可能只有 8 个文件。找出这 8 个的成本，往往高于改动
