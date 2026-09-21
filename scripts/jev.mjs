@@ -217,8 +217,10 @@ async function rerank(task, json) {
   console.log(`\n${files.length} files, ${ms}ms, ${tokens} input tokens\n`);
   for (const r of top) console.log(`  ${r.score.toFixed(2)}  ${r.path}`);
   console.log(
-    '\n  Ranking is semantic, not exhaustive: files changed only by reference tend to rank low.\n' +
-      '  Follow the imports of these before assuming the list is complete.'
+    `\n  Scores are levels 0-${LEVELS.length - 1}: ${LEVELS.length - 1} = must edit, ${LEVELS.length - 2} = existing pattern to copy, 1 = background.\n` +
+      '  Read >=2.5 first. A flat top-20 means nothing stood out, not that all 20 are candidates.\n' +
+      '  Not exhaustive. Before you finish: git grep the symbol you added for every declaration\n' +
+      '  and wrapper site. Those files change only by reference and can rank anywhere.'
   );
   // The printed top N is the whole point; the full ranking is only worth a file when
   // something will read past the cutoff. Opt in with --json.

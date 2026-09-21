@@ -158,11 +158,14 @@ jev gate HEAD~1                              # a past commit
 cutoff and it also writes the full ranking to `.jev-rerank.json` in the repo root; add that file
 to `.gitignore`.
 
-Read the printed list by the gap in the scores, not by the row count. `topN` is a fixed number of
-rows, not a filter — a task that genuinely touches 3 files still prints 20, and the bottom 17 are
-merely the least unrelated files in the repo. Scores are a distribution over four levels, from
-"no reason to open this file" to "likely must be read or edited", so a 0.3 means background, not
-fourth place.
+Read the printed list by the scores, not by the row count. `topN` is a fixed number of rows, not a
+filter — a task that genuinely touches 3 files still prints 20, and the bottom 17 are merely the
+least unrelated files in the repo.
+
+Scores are levels, not probabilities: 0 to 3, where 3 is "likely must be read or edited", 2 is
+"shows the existing pattern to follow", 1 is background and 0 is unrelated. Read everything at 2.5
+or above. Cut at a gap below that if there is one, but do not wait for a gap — a top 20 spanning
+half a point means nothing stood out, not that all 20 are candidates.
 
 ### Wiring up pre-commit
 

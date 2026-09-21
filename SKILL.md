@@ -13,7 +13,7 @@ read. Use it where the pool is large; decide yourself where the pool is small.
 
 | Command | Answers | Cost | Run it |
 |---|---|---|---|
-| `jev rerank "<task>"` | Which files does this task touch? | 1 call / 60 files; ~16s, ~93k input tokens at 705 files | Once per task |
+| `jev rerank "<task>"` | Which files does this task touch? | 1 call / 60 files; ~94k input tokens and 5–16s at ~705 files | Once per task |
 | `jev drift [glob]` | Which files broke a convention? | 1 call / file; ~250ms at 2KB, ~950ms at 18KB | On demand |
 | `jev gate [ref]` | Does this diff touch something dangerous? | 1 call / diff; 745–1770ms | Pre-commit |
 | `jev validate [n]` | Is `rerank` accurate on this repo? | n × a full `rerank` | Once per repo |
@@ -172,19 +172,53 @@ have missed or buried it.
 **Where it fails:** files changed only because a reference changed rank low (one ground-truth
 file landed at 121/705). Semantic scoring cannot see structural coupling, which shows up as a
 size effect: every task touching 1–4 files scored full marks, while an 11-file change reached
-5/11. Treat the top 20 as the core of a change, never the whole of it, and follow the imports of
-those files before assuming the list is complete.
+5/11. Treat the top 20 as the core of a change, never the whole of it — see
+[Combining with grep](#combining-with-grep) for closing the rest.
 
 **Reading the list:** `topN` is a fixed row count. A task touching 3 files still prints 20 rows,
-and the rest are the least unrelated files in the repo rather than candidates. Cut at the gap in
-the scores — they distribute over four levels from "no reason to open this file" to "likely must
-be read or edited", so 0.3 means background.
+and the rest are the least unrelated files in the repo rather than candidates.
+
+Scores are levels, not probabilities: **0–3**, where 3 is "likely must be read or edited", 2 is
+"shows the existing pattern to follow", 1 is background and 0 is unrelated. **Read everything at
+2.5 or above.** Cut at a gap below that if there is one, but do not wait for a gap — a top 20
+spanning 0.4 means nothing stood out, not that all 20 are candidates.
+
+Ranking is per file, not per symbol. A file holding both a live and a stale declaration of the
+same name ranks once, on the strength of the file; you still have to disambiguate by reading. A
+high rank is not evidence that the thing you are looking for in that file is the live one.
 
 **Output:** stdout only, nothing written to disk. Add `--json` only when something must read past
 the cutoff; it also dumps every row to `.jev-rerank.json` in the repo root, so tell the user to
 gitignore it if they do not already.
 
-Run once per task, not per edit. 16s is fine at the start of work and wrong inside a loop.
+Run once per task, not per edit. The cost that rules out a loop is ~94k input tokens per run, not
+the latency — it can come back in under 5s, which makes rerunning it feel cheaper than it is.
+
+## Combining with grep
+
+`rerank` finds the entry point. grep closes the change. Neither does the other's job, and the
+failure mode of using only `rerank` is not a missed file in the ranking — it is a ranked file you
+read and then under-changed.
+
+1. **`rerank` once**, with the task phrased in the repo's own vocabulary — the identifiers and
+   component names the code uses, not the words the user used. Read everything at 2.5 or above.
+2. **Name the symbol** you are about to add or change: the prop, the option field, the exported
+   type, the component.
+3. **`git grep -n <that symbol>`**, and again for the component callers actually import. This is
+   the class `rerank` structurally cannot rank — files that change only because a reference
+   changed. The two that bite every time are the shared type definition and the compatibility
+   wrapper the rest of the app still calls.
+4. **Done means every public surface a caller touches accepts the new option.** A hook taking an
+   option that no exported prop type declares is unreachable code: it typechecks, it passes
+   tests, and no caller can reach it.
+
+Skip step 1 when the task already names a file or an exact symbol. Never skip step 3.
+
+Measured, one task, same repo and model, `rerank`-led against grep-only: the `rerank` arm spent
+14% fewer tokens and 24% less wall clock, ranked all four ground-truth files inside the top 20 —
+and still shipped the option unreachable, because two of those four ranked files (the shared type
+at #3, the wrapper at #16) were read but not edited. Recall is not completeness. Steps 2–4 are
+where the grep-only arm spent its extra tokens, and they are not optional.
 
 ## `jev validate [n]`
 
@@ -276,7 +310,7 @@ there you are guessing at recall.
 ## When not to use this
 
 - **Scope you already know.** A named file, an exact symbol, a repo small enough to read: grep or
-  just open it. `rerank` costs 16s and ~93k input tokens to tell you what you knew.
+  just open it. `rerank` costs ~94k input tokens to tell you what you knew.
 - **One-off judgments where you are the one waiting.** Three options in front of you: decide. A
   round trip adds latency and no information.
 - **Judging candidates you just generated.** If state and options both come from the agent, the
