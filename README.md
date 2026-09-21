@@ -1,5 +1,7 @@
 # jev-assist
 
+It finds the files grep can never find — the ones a task actually needs changed.
+
 [中文](README.zh-CN.md)
 
 Starting a task in a 600-file repo, perhaps 8 of those files are worth reading. Finding the 8
@@ -11,7 +13,8 @@ tokens in proportion to the file count. Neither suits a judgment that has to be 
 the same question asked of every file.
 
 jev-assist delegates that class of judgment to [TypeSafe Jev](https://docs.typesafe.ai), which
-answers closed questions and returns typed values with probabilities rather than prose. Three
+asks every file the same question and gets back a concrete answer with a probability — yes or
+no, or a score — rather than prose. Three
 commands follow from it: `rerank` ranks every file by relevance to a task, `drift` checks files
 one by one against your team's conventions, and `gate` judges whether a diff about to be committed
 touches something dangerous.
@@ -102,36 +105,31 @@ is accurate is a measurable fact, not a claim you have to take.
 
 ## What it actually does
 
+jev-assist hands the model three repo-wide judgments — task relevance, convention compliance,
+diff risk — plus one command to verify accuracy:
+
 **`jev rerank "<task>"`** ranks every tracked file against a one-line task description. On a
-private React app of 705 files, replaying 10 real commits, the top 20 caught 68% of the files
-those commits touched and the top 40 caught 80%. The average is the boring part: every commit
-that touched 1 to 4 files scored full marks, while the one that touched 11 got 5 of them. So
-read the top 20 as the core of a change but never as the whole of it — past the cutoff the
-ranking is no longer reliable, and following the imports of the top results beats reading further
-down.
+705-file repo, replaying 10 real commits: the top 20 covered 68% of the files those commits
+touched, the top 40 covered 80%. Its edge over grep is files whose names never mention the
+feature — for an image-upload task, a shared upload service in an unrelated corner of the app
+ranked 6th. Beyond the rows it prints, the ranking is unreliable; follow the imports of the top
+results instead.
 
-Where it beats grep is files that never mention the feature at all. A shared upload service
-came back 6th for an image-upload task in a completely unrelated corner of the app. Nobody
-searching `avatar` or `profile` was going to find that.
+**`jev drift [glob]`** checks each file against your conventions, one call per file. The input
+is the convention itself, not a match pattern — judging what breaks it is left to the model,
+which surfaces violations grep cannot express: untranslated copy, calls bypassing the request
+wrapper, server state living outside the store. Question count barely moves the cost, so check
+several things at once.
 
-**`jev drift [glob]`** asks your conventions against your files, one call per file. The number
-of questions barely moves the cost, so ask ten things at once instead of one: untranslated copy,
-code that routes around the request wrapper you wrote for exactly this purpose, server state
-living outside the store. The difference from grep is the input: grep needs you to express the
-violation as a pattern that matches, while here you write down the convention itself and leave
-judging what breaks it to the model.
+**`jev gate [ref]`** flags risk in the staged diff and exits nonzero on a hit, so it works as a
+pre-commit hook on its own. Risk scores on four real commits: a decryption feature 0.99, a fix
+that swallowed errors 0.91, a CSS tweak 0.64, a comment-only change 0.03; 0.7–1.8 s per diff.
+Type checks, lint and unit tests all miss a change that silently drops user input — that is why
+this command exists.
 
-**`jev gate [ref]`** reads a staged diff and flags risk. It exits nonzero on a hit, so a
-pre-commit hook needs nothing but the bare command. Measured on four real commits: a decryption
-feature came back 0.99, a fix for a swallowed error 0.91, a CSS tweak 0.64, a comment-only
-change 0.03. Somewhere between 0.7 and 1.8 seconds per diff. Your typechecker, your linter and
-your unit tests will all wave through a change that quietly drops user input, which is the
-entire reason this command exists.
-
-**`jev validate [n]`** is the one to run first and the one everybody skips. It replays your own
-commits as tasks and grades the ranking against what each commit really changed. Accuracy does
-not survive the trip between two codebases, so the numbers above are ours. Your git history is
-free labelled data, already sitting there.
+**`jev validate [n]`** measures rerank accuracy on your own repo using your git history: it
+replays past commits as tasks and grades the ranking against the files each commit actually
+touched. Accuracy does not transfer across repos, so run it first on a new one.
 
 ## Commands
 
@@ -154,9 +152,9 @@ jev gate HEAD~1                              # a past commit
 | `jev check` | Is my key and config well-formed? | free, no network |
 | `jev key <k>` | Store an API key outside the repo | free, no network |
 
-`rerank` prints the top N and nothing else. Pass `--json` when something needs to read past the
-cutoff and it also writes the full ranking to `.jev-rerank.json` in the repo root; add that file
-to `.gitignore`.
+`rerank` prints the top N and nothing else (`topN`, default 20). Pass `--json` when something
+needs the ranking past what was printed — it writes the full ranking to `.jev-rerank.json` in
+the repo root; add that file to `.gitignore`.
 
 Read the printed list by the scores, not by the row count. `topN` is a fixed number of rows, not a
 filter — a task that genuinely touches 3 files still prints 20, and the bottom 17 are merely the
@@ -238,13 +236,13 @@ Top-level fields:
 | `batchSize` | no | `60` | Files scored per `rerank` call |
 | `topN` | no | `20` | Rows `rerank` prints. A fixed count, not a relevance filter |
 | `threshold` | no | `0.7` | Probability at or above which something counts as a hit, shared by `drift` and `gate` |
-| `validateK` | no | `[20, 40]` | Cutoffs `validate` computes recall at |
+| `validateK` | no | `[20, 40]` | Take the top K of each ranking to compute recall — the `recall@20`, `recall@40` in the output |
 
 Inside each entry of `conventions` and `gates`:
 
 | Field | Meaning |
 | --- | --- |
-| `ask` | The closed question put to the model. Anchor it to the concrete module ("the request wrapper in `src/services`"), never to a principle |
+| `ask` | The yes/no question put to the model, answered with a probability. Anchor it to the concrete module ("the request wrapper in `src/services`"), never to a principle |
 | `drift` / `risk` | The line printed on a hit. `conventions` use `drift`, `gates` use `risk` |
 | `ok` | What counts as passing. Exclusions go here; this is the main place you tune |
 
@@ -296,7 +294,8 @@ jev validate 20
 
 A commit subject is a task and the files that commit changed are the answer. `validate` walks
 back through non-merge commits until it has n that touched something inside `include`, ranks the
-whole repo against each subject line, and prints recall at each cutoff.
+whole repo against each subject line, and prints recall for each K — the share of truly changed
+files that land in the top K, the @20 and @40 columns below.
 
 ```
   #  task                                 truth   @20   @40
