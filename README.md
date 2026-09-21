@@ -1,6 +1,6 @@
 # jev-assist
 
-It finds the files grep can never find — the ones a task actually needs changed.
+Don't burn your expensive main model on grep-and-guess grunt work — let jev rank the whole repo, and save the main model for reading the right files and writing the right code.
 
 [![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist)
 [中文](README.zh-CN.md)

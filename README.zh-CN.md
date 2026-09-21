@@ -1,6 +1,6 @@
 # jev-assist
 
-它找到 grep 搜不到、却真正该改的那些文件。
+别让贵的主模型干 grep 试错的粗活——交给 jev 排完整个仓库，主模型只负责读对的文件、写对的代码。
 
 [![skills.sh 安装量](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist)
 [English](README.md)
