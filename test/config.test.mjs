@@ -178,6 +178,13 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   const description = skill.match(/^description:[^\n]*/m)?.[0];
   assert.ok(description, 'SKILL.md must carry a description in its frontmatter');
   assert.ok(description.length < 1024, `description is ${description.length} chars, too close to the 1024 cap`);
+  // An unquoted value containing `: ` is invalid YAML — a real installer parses zero skills and
+  // the skill cannot be installed at all. Quoted-scalar shape is the invariant, checked without
+  // a YAML dependency: `"..."` with no bare `"` inside.
+  // ponytail: shape check, not a parse. Swap in js-yaml if the frontmatter ever grows past two keys.
+  const value = description.slice('description:'.length).trim();
+  assert.match(value, /^".*"$/, 'description must be a double-quoted YAML scalar (it contains `: `)');
+  assert.doesNotMatch(value.slice(1, -1), /(?<!\\)"/, 'inner quotes in the description must be backslash-escaped');
   for (const cmd of ['rerank', 'drift', 'gate', 'validate'])
     assert.match(description, new RegExp(`\`${cmd}\``), `description must say when to reach for ${cmd}`);
 }
