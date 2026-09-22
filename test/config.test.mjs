@@ -246,10 +246,17 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   asks(ask('Grep', { pattern: 'useTranslation' }), 'Grep tool default mode');
   asks(ask('Grep', { pattern: 'x', output_mode: 'files_with_matches' }), 'Grep files_with_matches');
 
-  // Everything else must pass silently. A hook that interrupts reading is worse than no hook.
+  asks(ask('Bash', { command: 'grep -r --files-with-matches useTranslation src' }), 'long-form -l');
+
+  // Everything else must pass silently. A hook that interrupts reading is worse than no hook:
+  // every false positive is a step towards approving without reading the reason.
   const passes = [
     ['Bash', { command: 'grep -n useTranslation src/lang/index.ts' }, 'grep in one named file'],
     ['Bash', { command: 'grep -rn useTranslation src' }, 'recursive but showing matches, not listing'],
+    // The shape that was misfiring in v0.8.0: a targeted `-rn` read, scoped to a subtree and a
+    // file type. --include is the most common grep flag there is; asking about it is noise.
+    ['Bash', { command: 'grep -rn "基本信息" src/features/nps --include=*.tsx | head -20' }, '-rn scoped with --include'],
+    ['Bash', { command: 'grep -rn useTranslation src --exclude-dir=node_modules' }, '-rn with --exclude-dir'],
     ['Bash', { command: 'ls src && cat package.json' }, 'no grep at all'],
     ['Grep', { pattern: 'x', output_mode: 'content' }, 'Grep content mode reads what it found'],
     ['Read', { file_path: '/tmp/x' }, 'unrelated tool'],

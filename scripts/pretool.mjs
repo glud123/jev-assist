@@ -25,9 +25,12 @@ function broad(tool, input) {
   const cmd = String(input.command ?? '');
   if (!/\bgrep\b/.test(cmd)) return false;
   const recursive = /\s-[a-zA-Z]*[rR]/.test(cmd);
-  // -l/-c/-o list, count or strip matches instead of showing them; --include/--exclude is a
-  // filter wide enough to need one.
-  const enumerating = /\s-[a-zA-Z]*[lco]/.test(cmd) || /--(include|exclude)/.test(cmd);
+  // -l/-c/-o, and their long forms, list or count matches instead of showing them. Deliberately
+  // NOT --include: scoping a targeted `grep -rn` to one file type is the normal shape, and asking
+  // about it teaches the user to stop reading the reason.
+  const enumerating =
+    /\s-[a-zA-Z]*[lco]/.test(cmd) ||
+    /--(count|files-with(out)?-match(es)?|only-matching)\b/.test(cmd);
   return recursive && enumerating;
 }
 
