@@ -170,4 +170,16 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   rmSync(root, { recursive: true, force: true });
 }
 
+// SKILL.md frontmatter: the description is the only thing an agent reads before the skill fires,
+// so a silent truncation there means the skill never triggers at all. Keep it under 1024 and keep
+// each command's trigger in it — a description covering only `rerank` is how drift went unused.
+{
+  const skill = readFileSync(new URL('../SKILL.md', import.meta.url), 'utf8');
+  const description = skill.match(/^description:[^\n]*/m)?.[0];
+  assert.ok(description, 'SKILL.md must carry a description in its frontmatter');
+  assert.ok(description.length < 1024, `description is ${description.length} chars, too close to the 1024 cap`);
+  for (const cmd of ['rerank', 'drift', 'gate', 'validate'])
+    assert.match(description, new RegExp(`\`${cmd}\``), `description must say when to reach for ${cmd}`);
+}
+
 console.log('ok');

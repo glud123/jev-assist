@@ -95,11 +95,22 @@ session's working directory set to the repo being judged:
 When a user deletes their account, their scheduled exports keep running — find where that's handled
 ```
 
-The skill's description tells the agent when to fire without being asked: the task's words and the
-code's words don't overlap — another natural language, copy that lives only in i18n keys, a feature
-the code names differently — or a first grep comes back empty or flooded. Grep runs first as the
-probe: it converges, no ranking is needed; it comes back empty or flooded, and the agent ranks the
-repo instead of guessing.
+The skill's description tells the agent when to fire without being asked, and grep is always the
+probe that decides. If it converges on one neighborhood, nothing here runs — the agent reads the
+files. Otherwise the probe's outcome picks the command:
+
+- **Empty**, or flooded with hits the agent cannot **rank** → `rerank`. The task's words and the
+  code's words don't overlap: another natural language, copy that lives only in i18n keys, a
+  feature the code names differently.
+- **Flooded** with hits the agent cannot **classify** → `drift`. The literal matches but answers a
+  different question than the one asked, and telling the real instances apart means knowing what a
+  file is or what a match means — context no pattern can carry.
+- **A staged diff** → `gate`.
+
+Rank versus classify is what routes a flood to the right command: *which of these files matter for
+my change* needs an ordering, *which of these hits are real* needs a yes/no per file. Phrasing
+never triggers anything on its own — a vaguely worded question whose words match the code is still
+grep's job.
 
 Naming the skill also works, and is the fallback when it doesn't fire on its own:
 

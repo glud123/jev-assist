@@ -1,13 +1,17 @@
 ---
 name: jev-assist
-description: Rank every file in a repo by relevance to a task, for when grep has nothing to grep for, because the task's words and the code's words don't overlap — a different natural language, UI copy that lives only in i18n keys, a concept the code names differently, or a behavior described with no shared noun. Use when a quick grep probe comes back empty, or flooded with hits you can't rank. Skip it when a literal from the task matches and converges on one neighborhood. Also scans for convention drift and gates diffs on risks linters cannot see, and measures its own accuracy against the repo's commit history.
+description: Whole-repo judgments a linter cannot make. Grep first; the probe's outcome picks the command. `rerank` ranks every file by relevance to a task — when the probe comes back empty, or floods with hits you cannot rank, because the task's words and the code's don't overlap (another natural language, copy living only in i18n keys, a concept the code names differently); skip it when a literal converges on one neighborhood. `drift` asks one question of every file — for "which files still do X" or "what hasn't moved to Y yet" sweeps, and when a flood cannot be classified: the literal matches but answers a different question, and separating the real instances needs to know what a file is or what a match means — context no pattern can carry. `gate` judges a staged diff for auth, PII, data-loss and swallowed-error risk. `validate` measures rerank's recall against this repo's commit history.
 ---
 
 # jev-assist
 
-Jev answers closed questions about code as probabilities, not prose. It is not a better reasoner
-than the agent driving it — it is a cheap way to apply one judgment across a pool too large to
-read. Use it where the pool is large; decide yourself where the pool is small.
+Jev answers closed questions about code as probabilities, not prose. It applies one judgment across
+a pool too large to read, in one of two shapes: **ranking** the pool against a task (`rerank` —
+reach for it when grep has no literal to narrow with, or narrowed to a flood you cannot order), or
+**classifying** every file in it one at a time (`drift` — when grep narrowed but cannot tell the
+real hits from the noise). Neither is a second opinion on your own reasoning; it does not reason
+better than the agent driving it. Use it where the pool is large; decide yourself where the pool is
+small.
 
 ## Commands
 
@@ -23,6 +27,41 @@ read. Use it where the pool is large; decide yourself where the pool is small.
 Exit codes: `gate` returns 1 on any flag, `check` returns 1 on any config problem or a missing
 key. Every command returns 1 on a usage, config or API error, so a non-zero exit is not by itself
 a finding — read the output.
+
+## Which command — route on the probe, not the wording
+
+**Always grep first.** One probe, and its outcome picks the command. Nothing here runs on a task's
+phrasing: a vague question whose words match the code is still grep's job, and a precise question
+whose words don't match is not.
+
+| The probe came back | You cannot | Use |
+|---|---|---|
+| Converging on one neighborhood | — | Neither. Read the files. |
+| Empty — no literal to search | find the entry point | `rerank` |
+| Flooded — hundreds of hits | **rank** them: which matter most for this task | `rerank` |
+| Flooded — hundreds of hits | **classify** them: which are real instances vs noise | `drift` |
+| A diff, about to be committed | see what a linter cannot | `gate` |
+
+**Rank vs classify is the distinction that gets missed.** Both start from a flood. Ask which
+question the flood failed to answer:
+
+- *"Which of these 200 files matter for the change I'm making?"* → one task, many candidates,
+  needs an ordering → **`rerank`**.
+- *"Which of these 200 hits are actually the thing I'm looking for?"* → one question, many files,
+  needs a yes/no per file → **`drift`**.
+
+**The tell is what the exclusion asks, not how many you wrote.** Iterating on a pattern is normal —
+fixing a word boundary, narrowing a path, changing the output format. Those stay in grep. The
+signal is an exclusion that needs to know *what a file is* or *what a match means*: is this string
+user-facing copy or a comment, is this file a fixture or the real thing, is this `catch {}`
+deliberate. A pattern cannot carry that context, so each such exclusion is a judgment you are
+hand-coding against a proxy. Those belong in a convention's `ok` field, as prose, evaluated per
+file.
+
+**Narrow before judging.** `drift` is the usual place the two compose: when a literal search can
+cheaply rule out most of the repo, run it first and pass the survivors as a glob or path list
+rather than scanning everything at 1 call per file. (The reverse order, grep *after* `rerank`, is
+[Combining with grep](#combining-with-grep).)
 
 ## Invoking
 
@@ -267,6 +306,24 @@ Two adjustments a hand-rolled comparison misses, so do not reimplement this with
 
 Asks every convention in the config against every file. Catches drift grep cannot, because grep
 only finds what you already thought to look for.
+
+**Reach for it when:**
+- The user asks a sweep: "which files still do X", "what hasn't been migrated to Y yet", "is Z
+  consistent across the app". One question, every file, a yes/no each.
+- A literal search floods and you cannot classify the hits — the pattern matches, but it answers a
+  different question than you asked. The tell is an exclusion that needs context a pattern cannot
+  carry: is this string user-facing copy or a code comment, is this file a fixture or the real
+  thing, is this `catch {}` deliberate.
+
+**Skip it when:**
+- A linter, type checker or test can decide it. Those are cheaper and actually authoritative.
+- The literal search already converged — the hits are the answer, with no noise to separate.
+- No convention in `jev.config.json` covers the question. Add one first (they cost nearly nothing
+  to add) or you are running the wrong questions against the right files.
+
+**Scope it.** `drift` is 1 call per file, so the glob is the cost knob: `jev drift 'src/features/**'`
+beats a bare `jev drift` when you already know where the answer lives. When a literal search can
+cheaply exclude most of the repo, run it first and pass the survivors.
 
 Question count barely affects cost or latency — output tokens are free and questions evaluate in
 parallel. **Ask everything you care about in one pass:** ten conventions cost about what one
