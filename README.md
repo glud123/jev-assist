@@ -8,8 +8,9 @@ Don't burn your expensive main model on grep-and-guess grunt work — let jev ra
 Starting a task in a 600-file repo, perhaps 8 of those files are worth reading. Finding the 8
 often costs more than changing them.
 
-Existing approaches have their limits. Grep needs the target expressed as a pattern that matches,
-so it reaches only the files naming the feature. Having a model read the whole repo costs time and
+Existing approaches have their limits. Grep needs the task's words to appear in the code, so when
+they don't — the task is in another language, the copy lives only in i18n keys, the code names the
+feature differently — it comes back empty. Having a model read the whole repo costs time and
 tokens in proportion to the file count. Neither suits a judgment that has to be applied at scale —
 the same question asked of every file.
 
@@ -82,9 +83,25 @@ npm unlink -g jev-assist                 # only if you ran npm link
 
 ## Using it in an agent session
 
-The point of the skill is that the agent reaches for it when it should. You do not memorize
-commands; you state the intent, with the session's working directory set to the repo being
-judged.
+The point of the skill is that the agent reaches for it when it should. You state the task the way
+you would say it to a teammate — your own words, your own language, no file names — with the
+session's working directory set to the repo being judged:
+
+```
+优化一下用户反馈列表页的表格，列太多不好对照
+```
+
+```
+When a user deletes their account, their scheduled exports keep running — find where that's handled
+```
+
+The skill's description tells the agent when to fire without being asked: the task's words and the
+code's words don't overlap — another natural language, copy that lives only in i18n keys, a feature
+the code names differently — or a first grep comes back empty or flooded. Grep runs first as the
+probe: it converges, no ranking is needed; it comes back empty or flooded, and the agent ranks the
+repo instead of guessing.
+
+Naming the skill also works, and is the fallback when it doesn't fire on its own:
 
 ```
 Use jev-assist to find which files this task touches before you start: add CSV export to
@@ -100,9 +117,8 @@ Before I commit, use jev-assist to check whether the staged changes touch anythi
 ```
 
 The agent calls `scripts/jev.mjs` as described in `SKILL.md` and reads the ranking or the flags
-back to you. If it does not reach for the skill on its own, name `jev-assist` in the prompt. On
-a repo it has not used this on before, have it run `jev validate 20` first — whether the ranking
-is accurate is a measurable fact, not a claim you have to take.
+back to you. On a repo it has not used this on before, have it run `jev validate 20` first —
+whether the ranking is accurate is a measurable fact, not a claim you have to take.
 
 ## What it actually does
 
@@ -111,8 +127,8 @@ diff risk — plus one command to verify accuracy:
 
 **`jev rerank "<task>"`** ranks every tracked file against a one-line task description. On a
 705-file repo, replaying 10 real commits: the top 20 covered 68% of the files those commits
-touched, the top 40 covered 80%. Its edge over grep is files whose names never mention the
-feature — for an image-upload task, a shared upload service in an unrelated corner of the app
+touched, the top 40 covered 80%. Its edge over grep is files that share no token with the
+task — for an image-upload task, a shared upload service in an unrelated corner of the app
 ranked 6th. Beyond the rows it prints, the ranking is unreliable; follow the imports of the top
 results instead.
 

@@ -1,6 +1,6 @@
 ---
 name: jev-assist
-description: Rank every file in a repo by relevance to a task, for when grep has nothing to grep for. Use when a task names no file and you cannot guess which files it touches in a repo too large to read; skip it when the task points at a file, or at an exact symbol or string grep finds for free. Also scans for convention drift and gates diffs on risks linters cannot see, and measures its own accuracy against the repo's commit history.
+description: Rank every file in a repo by relevance to a task, for when grep has nothing to grep for, because the task's words and the code's words don't overlap — a different natural language, UI copy that lives only in i18n keys, a concept the code names differently, or a behavior described with no shared noun. Use when a quick grep probe comes back empty, or flooded with hits you can't rank. Skip it when a literal from the task matches and converges on one neighborhood. Also scans for convention drift and gates diffs on risks linters cannot see, and measures its own accuracy against the repo's commit history.
 ---
 
 # jev-assist
@@ -171,11 +171,11 @@ nothing runs on its own, and ranking 705 files is wasted on a task whose scope y
   sweeping renames).
 
 **Reach for it when:**
-- The task is described in domain terms with no keyword to search for.
+- The task's words and the code's don't overlap: a different natural language, UI copy that lives only in i18n keys, a concept the code names differently, a behavior described with no shared noun.
 - The files that matter likely share no token with the task.
-- Grep returned 200 hits with no way to rank them.
+- The probe flooded — grep returned hundreds of hits with no way to rank them.
 
-Grep first costs nothing and settles most cases.
+Grep first — one probe, three outcomes: convergence (done), empty, or a flood you cannot rank. Only the last two are rerank's business, and the probe settles most cases in seconds.
 
 **Measured** on one private 705-file React app, 10 consecutive commits as tasks, ground truth
 from what each commit changed: **recall@20 0.68, recall@40 0.80** over 41 files.
@@ -215,8 +215,9 @@ the latency — it can come back in under 5s, which makes rerunning it feel chea
 failure mode of using only `rerank` is not a missed file in the ranking — it is a ranked file you
 read and then under-changed.
 
-1. **`rerank` once**, with the task phrased in the repo's own vocabulary — the identifiers and
-   component names the code uses, not the words the user used. Read everything at 2.5 or above.
+1. **`rerank` once**, with the task phrased concretely — what gets added or changed. Use the
+   repo's terms where you know them and the user's words where you don't; rerank matches meaning,
+   not tokens. Read everything at 2.5 or above.
 2. **Name the symbol** you are about to add or change: the prop, the option field, the exported
    type, the component.
 3. **`git grep -n <that symbol>`**, and again for the component callers actually import. This is
