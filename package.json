@@ -9,6 +9,7 @@
   },
   "files": [
     "scripts/",
+    "hooks/",
     "SKILL.md",
     "jev.config.example.json"
   ],

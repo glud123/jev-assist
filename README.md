@@ -31,9 +31,10 @@ passes only make financial sense under that pricing.
 
 ```
 Install the jev-assist skill with npx skills add glud123/jev-assist, then finish the setup
-per its SKILL.md: run jev key with the key <your-key>, write a jev.config.json in this
-repo's root, and run jev check plus jev validate 20. Show me the results along with which
-conventions you inferred from reading code versus which ones you guessed.
+per its SKILL.md: run jev key with the key <your-key>, run its install-hook.mjs, write a
+jev.config.json in this repo's root, and run jev check plus jev validate 20. Show me the
+results along with which conventions you inferred from reading code versus which ones you
+guessed.
 ```
 
 It has read your code, and `SKILL.md` tells it what to derive from where, so the first draft of
@@ -46,9 +47,16 @@ the first step, because every command that reaches the API fails without it.
 ```sh
 npx skills add glud123/jev-assist                        # install the skill
 jev key sk-...                                           # key → ~/.config/jev/key, 0600, outside the repo
+node <skill-dir>/scripts/install-hook.mjs                # per machine; see below
 cp <skill-dir>/jev.config.example.json jev.config.json   # then edit it, in the repo being judged
 jev check                                                # verify key and config
 ```
+
+`install-hook.mjs` registers a `SessionStart` hook in `~/.claude/settings.json` so each session
+starts knowing this skill exists. Skip it and the skill still works when asked for by name, but an
+agent mid-task will reach for `grep` instead. It is additive and idempotent, keeps any other
+`SessionStart` hooks, refuses to write a settings file it cannot parse, and leaves a `.jev-bak`
+copy beside it. Takes effect in the next session, not the one that ran it.
 
 Node 18 or newer, because it uses the built-in `fetch`. Nothing else to install. Any
 skills-compatible agent works — Claude Code, Codex and Cursor read the same `SKILL.md` and call
@@ -61,19 +69,22 @@ shell:
 git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
 ```
 
-**Uninstall.** Deleting the skill is not enough — the setup writes a key, a config and possibly a
-pre-commit hook, all outside the skill directory, and a hook calling `jev gate` breaks every
-commit once the script is gone. Hand an agent this prompt and `SKILL.md` gives it the full list:
+**Uninstall.** Deleting the skill is not enough — the setup writes a key, a config and up to two
+hooks, all outside the skill directory, and both hooks name the script by path: the pre-commit one
+breaks every commit once it is gone, the `SessionStart` one breaks every session. Hand an agent
+this prompt and `SKILL.md` gives it the full list:
 
 ```
 Uninstall the jev-assist skill following the Uninstall section of its SKILL.md: remove the
-pre-commit hook, the stored key, any JEV_ environment variables, the per-repo config and
-output, and the skill itself. Show me anything you are unsure about before deleting it.
+pre-commit hook, the SessionStart hook, the stored key, any JEV_ environment variables, the
+per-repo config and output, and the skill itself. Show me anything you are unsure about
+before deleting it.
 ```
 
-By hand:
+By hand, hooks first — while the script is still there to run:
 
 ```sh
+node <skill-dir>/scripts/install-hook.mjs --remove   # drops the SessionStart hook
 rm -f .git/hooks/pre-commit              # only if `jev gate` is all it contains
 rm -f ~/.config/jev/key                  # per machine ($XDG_CONFIG_HOME/jev/key if set)
 rm -f jev.config.json .jev-rerank.json   # per judged repo, from its root

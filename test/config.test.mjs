@@ -5,6 +5,7 @@ import { readFileSync, writeFileSync, mkdirSync, copyFileSync as copySync, mkdte
 import { execFileSync } from 'node:child_process';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
+import { fileURLToPath } from 'node:url';
 import { exempt, bar, truthFrom, recallAt, configProblems, provider, keyPath, pathspec } from '../scripts/jev.mjs';
 
 const cfg = JSON.parse(readFileSync(new URL('../jev.config.example.json', import.meta.url), 'utf8'));
@@ -192,6 +193,62 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   // the work the skill replaces, so the agent iterates on grep exclusions and never loads at all.
   // Two sessions died exactly this way. Probe-routing belongs in the body, not the trigger.
   assert.match(description, /before searching/i, 'description must say to load before searching, not after a probe');
+}
+
+// The SessionStart hook is what gets the skill considered before the first grep — the description
+// alone lost three sessions to it. Claude Code discards a hook whose stdout is not valid JSON,
+// silently, so assert the shape rather than trusting it.
+{
+  const hook = fileURLToPath(new URL('../scripts/session-start.mjs', import.meta.url));
+  // Run from / to prove the preflight is resolved relative to the script, not the cwd Claude Code has.
+  const out = JSON.parse(execFileSync(process.execPath, [hook], { encoding: 'utf8', cwd: '/' }));
+  assert.equal(out.hookSpecificOutput?.hookEventName, 'SessionStart');
+  assert.match(out.hookSpecificOutput.additionalContext, /jev-assist/, 'preflight must name the skill');
+  // Both shapes must be reachable from it, or the half it omits goes unused the way `drift` did.
+  for (const cmd of ['rerank', 'drift'])
+    assert.match(out.hookSpecificOutput.additionalContext, new RegExp(`\`${cmd}\``), `preflight must name ${cmd}`);
+}
+
+// install-hook merges into a settings file the user did not write and cannot afford to lose, so
+// the invariants are: never lose a sibling hook, never write invalid JSON, and be idempotent —
+// `npx skills add` runs setup again on every update.
+{
+  const home = mkdtempSync(join(tmpdir(), 'jev-hookinst-'));
+  const dir = join(home, '.claude');
+  mkdirSync(dir);
+  const settings = join(dir, 'settings.json');
+  const installer = fileURLToPath(new URL('../scripts/install-hook.mjs', import.meta.url));
+  const install = (...args) => execFileSync(process.execPath, [installer, ...args], {
+    encoding: 'utf8', env: { ...process.env, HOME: home }, stdio: 'pipe',
+  });
+  const read = () => JSON.parse(readFileSync(settings, 'utf8'));
+  const ours = (d) => (d.hooks?.SessionStart ?? [])
+    .flatMap((e) => e.hooks ?? [])
+    .filter((h) => h.command?.includes('session-start.mjs'));
+
+  const original = { model: 'x', hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'other --hi' }] }] } };
+  writeFileSync(settings, JSON.stringify(original, null, 2));
+
+  install();
+  assert.equal(ours(read()).length, 1, 'install must register the hook');
+  assert.equal(read().model, 'x', 'install must not drop unrelated settings');
+  assert.equal(read().hooks.SessionStart.length, 2, 'install must keep a sibling SessionStart hook');
+
+  install();
+  assert.equal(ours(read()).length, 1, 'install must be idempotent, not append a second copy');
+
+  install('--remove');
+  assert.equal(ours(read()).length, 0, 'remove must drop the hook');
+  assert.deepEqual(read().hooks.SessionStart, original.hooks.SessionStart, 'remove must restore the original entries');
+
+  // A refusal, not a half-written file: a broken settings.json breaks every future session.
+  writeFileSync(settings, '{oops');
+  let code = 0;
+  try { install(); } catch (e) { code = e.status; }
+  assert.equal(code, 1, 'install must exit 1 on unparseable settings');
+  assert.equal(readFileSync(settings, 'utf8'), '{oops', 'install must leave a bad file untouched');
+
+  rmSync(home, { recursive: true, force: true });
 }
 
 console.log('ok');

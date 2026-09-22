@@ -26,8 +26,8 @@ jev-assist 把这类判断交给 [TypeSafe Jev](https://docs.typesafe.ai)——�
 
 ```
 用 npx skills add glud123/jev-assist 安装 jev-assist skill，然后按它的 SKILL.md 把设置做完：
-用密钥 <你的密钥> 执行 jev key，在当前仓库根目录写一份 jev.config.json，
-最后跑 jev check 和 jev validate 20，把结果和你推断出的约定一起给我看。
+用密钥 <你的密钥> 执行 jev key，跑一下它的 install-hook.mjs，在当前仓库根目录写一份
+jev.config.json，最后跑 jev check 和 jev validate 20，把结果和你推断出的约定一起给我看。
 ```
 
 它读过你的代码，`SKILL.md` 也写清了每一项该从哪儿推，配置的第一版交给它比你手写快。发这段之前先去
@@ -39,9 +39,15 @@ jev-assist 把这类判断交给 [TypeSafe Jev](https://docs.typesafe.ai)——�
 ```sh
 npx skills add glud123/jev-assist          # 装 skill
 jev key sk-...                             # 密钥存到 ~/.config/jev/key，0600，仓库之外
+node <skill 目录>/scripts/install-hook.mjs  # 每台机器一次，见下
 cp <skill 目录>/jev.config.example.json jev.config.json   # 在要被判断的仓库里改
 jev check                                  # 校验密钥和配置
 ```
+
+`install-hook.mjs` 会在 `~/.claude/settings.json` 里注册一个 `SessionStart` hook，让每个会话一开始
+就知道有这个 skill。不装它 skill 照样能用，但只在你点名时用得上——agent 做着任务时会直接去 `grep`。
+这个脚本是追加式的、可重复执行，保留你原有的 `SessionStart` hook，遇到解析不了的设置文件会拒绝写入，
+并在旁边留一份 `.jev-bak`。**下个会话才生效**，跑它的那个会话里看不到。
 
 要求 Node 18 以上（用到内置 `fetch`），除此之外没有依赖。任何支持 skills 的 agent 都能用——Claude
 Code、Codex、Cursor 读的是同一份 `SKILL.md`，按路径调脚本。
@@ -52,18 +58,20 @@ Code、Codex、Cursor 读的是同一份 `SKILL.md`，按路径调脚本。
 git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
 ```
 
-**卸载。** 只删 skill 不够——安装时写进去的密钥、配置，还有可能装上的 pre-commit hook，都在 skill
-目录之外，而一个调 `jev gate` 的 hook 在脚本没了之后会让每次提交都失败。把下面这段发给 agent，完整
-清单在 `SKILL.md` 里：
+**卸载。** 只删 skill 不够——安装时写进去的密钥、配置，还有最多两个 hook，都在 skill 目录之外，而
+两个 hook 都是按路径指向脚本的：pre-commit 那个在脚本没了之后会让每次提交都失败，`SessionStart`
+那个会让每个会话都失败。把下面这段发给 agent，完整清单在 `SKILL.md` 里：
 
 ```
-按 jev-assist 的 SKILL.md 里 Uninstall 那节把这个 skill 卸载掉：pre-commit hook、存下来的
-密钥、所有 JEV_ 环境变量、每个仓库里的配置和产出，以及 skill 本身。不确定的先给我看再删。
+按 jev-assist 的 SKILL.md 里 Uninstall 那节把这个 skill 卸载掉：pre-commit hook、
+SessionStart hook、存下来的密钥、所有 JEV_ 环境变量、每个仓库里的配置和产出，以及 skill
+本身。不确定的先给我看再删。
 ```
 
-手动：
+手动，先卸 hook——趁脚本还在，还跑得起来：
 
 ```sh
+node <skill 目录>/scripts/install-hook.mjs --remove   # 摘掉 SessionStart hook
 rm -f .git/hooks/pre-commit              # 仅当它里面只有 `jev gate`
 rm -f ~/.config/jev/key                  # 每台机器一份（设了 $XDG_CONFIG_HOME 就在那下面）
 rm -f jev.config.json .jev-rerank.json   # 每个被判断的仓库一份，在它的根目录执行

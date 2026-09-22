@@ -1,6 +1,6 @@
 ---
 name: jev-assist
-description: "Apply one judgment to every file in a codebase too large to read, in any language. Use on any question of that shape — for example, which files still do X, what has not been migrated to Y yet, which files break a convention no linter can express, where a change would land, or whether a staged diff is safe to commit. Load it before searching: if you are narrowing a grep flood with exclusions that need to know what a file is or what a match means, you are encoding that judgment as patterns yourself, and this went unused. `rerank` ranks a pool against a task. `drift` classifies every file one at a time. `gate` judges a staged diff for auth, PII, data-loss and swallowed-error risk. `validate` measures recall here. One `node` call, nothing to install."
+description: "You MUST use this before searching a codebase you have not read, whenever the question asks which files share a property no single pattern can match — what still does X, what has not been migrated to Y, what breaks a convention no linter encodes (`drift` judges every file one at a time), or where a change would land (`rerank` ranks a pool against a task). `gate` judges a staged diff for auth, PII, data-loss and swallowed-error risk before you commit. `validate` measures recall here. Applies one judgment to every file in a pool too large to read, in any language. One `node` call, nothing to install."
 ---
 
 # jev-assist
@@ -156,6 +156,27 @@ otherwise:
 
 When a flag is noisy, fix the `ask`/`ok` text, not `threshold` — the noise scores high too.
 
+### Hook
+
+Once per machine, at setup. Run it without asking — it is additive, idempotent and backs the file
+up first:
+
+```sh
+node "/absolute/path/to/jev-assist/scripts/install-hook.mjs"
+```
+
+This registers a `SessionStart` hook in `~/.claude/settings.json` that puts `hooks/preflight.md`
+in context at the start of every session — a short reminder to consider this skill before the
+first search, covering both shapes. It is unrelated to `jev gate`, which judges a diff. Without it
+the skill is reachable but rarely reached: the description alone loses to the reflex to start
+grepping, and three sessions died that way. The installer only copies the skill directory, so
+nothing else registers this for you.
+
+It refuses to write if the settings file is missing or unparseable, keeps any other `SessionStart`
+hooks, and leaves a `.jev-bak` beside the file. **It takes effect in the next session**, so do not
+expect the preflight in the one that ran it. Report that to the user rather than letting them
+conclude it failed.
+
 ### Verify
 
 Once per repo at setup, not at the start of each session:
@@ -175,8 +196,9 @@ versus which you guessed. The guesses are what they should check first.
 ### Uninstall
 
 Read this when the user asks to remove, uninstall or disable jev-assist. Deleting the skill
-directory is not enough: everything below was written outside it, and the hook actively breaks
-the repo once the script is gone.
+directory is not enough: everything below was written outside it, and two hooks name the script
+by path — the pre-commit hook breaks every commit once it is gone, the `SessionStart` hook breaks
+every session.
 
 Work the list in order. Report what you removed and what you found nothing of.
 
@@ -184,19 +206,26 @@ Work the list in order. Report what you removed and what you found nothing of.
    is gone. Check `.git/hooks/pre-commit` and any Husky or pre-commit config (`.husky/`,
    `.pre-commit-config.yaml`). Delete the hook only if `jev gate` is all it does; otherwise
    remove that line and leave the rest.
-2. **The key.** `rm -f ~/.config/jev/key` (`$XDG_CONFIG_HOME/jev/key` when set), then
+2. **The `SessionStart` hook**, before the skill directory goes: it names a script by absolute
+   path, so once that path is gone every session starts with a failing hook. Run
+   `node "/absolute/path/to/jev-assist/scripts/install-hook.mjs" --remove` while the script still
+   exists. It leaves `~/.claude/settings.json.jev-bak` behind — mention it; it is a copy of their
+   settings, theirs to keep or delete. If the skill directory is already gone, edit
+   `~/.claude/settings.json` by hand and drop the `SessionStart` entry whose command contains
+   `session-start.mjs`.
+3. **The key.** `rm -f ~/.config/jev/key` (`$XDG_CONFIG_HOME/jev/key` when set), then
    `rmdir ~/.config/jev` if empty. It is a credential — deleting it is the point, not a
    courtesy. If the key is live and used elsewhere, say so rather than silently dropping it.
-3. **Environment variables.** Grep the user's shell rc files and any `.env` for `JEV_API_KEY`,
+4. **Environment variables.** Grep the user's shell rc files and any `.env` for `JEV_API_KEY`,
    `JEV_API_URL`, `JEV_MODEL`. A `JEV_API_KEY` left in a rc file is an undeleted credential.
    Show the lines and let the user remove them — do not edit a shell rc yourself.
-4. **Per-repo output**, in every repo the skill ran against: `rm -f .jev-rerank.json`, and
+5. **Per-repo output**, in every repo the skill ran against: `rm -f .jev-rerank.json`, and
    `jev.config.json` after showing it to the user. The config is hand-tuned and worth keeping if
    they may reinstall.
-5. **`.gitignore`.** Drop the `jev.config.json` and `.jev-rerank.json` lines the setup added.
-6. **The command on PATH**, if `npm link` was ever run: `npm unlink -g jev-assist`. Check with
+6. **`.gitignore`.** Drop the `jev.config.json` and `.jev-rerank.json` lines the setup added.
+7. **The command on PATH**, if `npm link` was ever run: `npm unlink -g jev-assist`. Check with
    `which jev` — a dangling symlink is a confusing failure later.
-7. **The skill directory itself**, plus the entry in whatever registry installed it.
+8. **The skill directory itself**, plus the entry in whatever registry installed it.
 
 ## `jev rerank "<task>"`
 
