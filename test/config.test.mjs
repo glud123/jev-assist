@@ -191,7 +191,7 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   // whose first instruction is "grep first" conditions the load on evidence that only exists after
   // the work the skill replaces, so the agent iterates on grep exclusions and never loads at all.
   // Two sessions died exactly this way. Probe-routing belongs in the body, not the trigger.
-  assert.match(description, /BEFORE searching/, 'description must say to load before searching, not after a probe');
+  assert.match(description, /before searching/i, 'description must say to load before searching, not after a probe');
 }
 
 console.log('ok');
