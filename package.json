@@ -1,6 +1,6 @@
 {
   "name": "jev-assist",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Typed judgments over a codebase via TypeSafe Jev: context preselection, convention drift, diff gating",
   "type": "module",
   "license": "MIT",
