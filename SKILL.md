@@ -165,17 +165,28 @@ up first:
 node "/absolute/path/to/jev-assist/scripts/install-hook.mjs"
 ```
 
-This registers a `SessionStart` hook in `~/.claude/settings.json` that puts `hooks/preflight.md`
-in context at the start of every session — a short reminder to consider this skill before the
-first search, covering both shapes. It is unrelated to `jev gate`, which judges a diff. Without it
-the skill is reachable but rarely reached: the description alone loses to the reflex to start
-grepping, and three sessions died that way. The installer only copies the skill directory, so
-nothing else registers this for you.
+This registers two hooks in `~/.claude/settings.json`. Neither is related to `jev gate`, which
+judges a diff. The installer only copies the skill directory, so nothing else registers them for
+you.
 
-It refuses to write if the settings file is missing or unparseable, keeps any other `SessionStart`
-hooks, and leaves a `.jev-bak` beside the file. **It takes effect in the next session**, so do not
-expect the preflight in the one that ran it. Report that to the user rather than letting them
-conclude it failed.
+- **`SessionStart`** puts `hooks/preflight.md` in context at the start of every session — a short
+  reminder covering both shapes.
+- **`PreToolUse`** (`scripts/pretool.mjs`) asks for confirmation the first time a session runs a
+  repo-wide file-enumerating search: `grep -rl`/`-rc`/`--include`, or the `Grep` tool in a
+  file-listing mode. Once per session, keyed on session id, so a long grep chain costs one
+  keypress. Anything it cannot classify passes silently.
+
+The second hook exists because the first was not enough. A session with the full preflight in
+context, the full description in its skill listing, and a memory saying to use the skill still
+answered "which files have no i18n yet" with nine hand-written greps and never called the Skill
+tool — the injected text sat 40 messages behind the moment the reflex fired, and the first action
+was `ls`, which no reminder about grep covers. The preflight is the argument; `PreToolUse` is what
+puts it in front of you at the moment you are making the decision.
+
+The installer refuses to write if the settings file is missing or unparseable, keeps any other
+hooks on both events, and leaves a `.jev-bak` beside the file. **They take effect in the next
+session**, so do not expect either in the one that ran the installer. Report that to the user
+rather than letting them conclude it failed.
 
 ### Verify
 
@@ -206,13 +217,14 @@ Work the list in order. Report what you removed and what you found nothing of.
    is gone. Check `.git/hooks/pre-commit` and any Husky or pre-commit config (`.husky/`,
    `.pre-commit-config.yaml`). Delete the hook only if `jev gate` is all it does; otherwise
    remove that line and leave the rest.
-2. **The `SessionStart` hook**, before the skill directory goes: it names a script by absolute
-   path, so once that path is gone every session starts with a failing hook. Run
-   `node "/absolute/path/to/jev-assist/scripts/install-hook.mjs" --remove` while the script still
-   exists. It leaves `~/.claude/settings.json.jev-bak` behind — mention it; it is a copy of their
-   settings, theirs to keep or delete. If the skill directory is already gone, edit
-   `~/.claude/settings.json` by hand and drop the `SessionStart` entry whose command contains
-   `session-start.mjs`.
+2. **The `SessionStart` and `PreToolUse` hooks**, before the skill directory goes: both name a
+   script by absolute path, so once that path is gone every session starts with a failing hook and
+   every `Bash`/`Grep` call hits a second one. Run
+   `node "/absolute/path/to/jev-assist/scripts/install-hook.mjs" --remove` while the scripts still
+   exist; one run removes both. It leaves `~/.claude/settings.json.jev-bak` behind — mention it; it
+   is a copy of their settings, theirs to keep or delete. If the skill directory is already gone,
+   edit `~/.claude/settings.json` by hand and drop the entries whose command contains
+   `session-start.mjs` or `pretool.mjs`.
 3. **The key.** `rm -f ~/.config/jev/key` (`$XDG_CONFIG_HOME/jev/key` when set), then
    `rmdir ~/.config/jev` if empty. It is a credential — deleting it is the point, not a
    courtesy. If the key is live and used elsewhere, say so rather than silently dropping it.

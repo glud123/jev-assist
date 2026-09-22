@@ -44,10 +44,16 @@ cp <skill 目录>/jev.config.example.json jev.config.json   # 在要被判断的
 jev check                                  # 校验密钥和配置
 ```
 
-`install-hook.mjs` 会在 `~/.claude/settings.json` 里注册一个 `SessionStart` hook，让每个会话一开始
-就知道有这个 skill。不装它 skill 照样能用，但只在你点名时用得上——agent 做着任务时会直接去 `grep`。
-这个脚本是追加式的、可重复执行，保留你原有的 `SessionStart` hook，遇到解析不了的设置文件会拒绝写入，
-并在旁边留一份 `.jev-bak`。**下个会话才生效**，跑它的那个会话里看不到。
+`install-hook.mjs` 会在 `~/.claude/settings.json` 里注册两个 hook：一个 `SessionStart`，让每个会话
+一开始就知道有这个 skill；一个 `PreToolUse`，在一个会话第一次跑全仓库列文件式搜索时要一次确认
+（`grep -rl`/`-rc`/`--include`，或 `Grep` 工具的列文件模式）。第二个之所以存在，是因为第一个不够：
+有个会话在提示词完整在上下文里的情况下，依然用九次 grep 回答了「哪些文件还没做多语言」，给出的数字
+虚高两成——注入的文字离反射触发的那一刻太远。它是询问而不是拦截，每个会话只问一次，判断不了的一律
+放过。
+
+两个都不装，skill 照样能用，但只在你点名时用得上——agent 做着任务时会直接去 `grep`。这个脚本是追加
+式的、可重复执行，保留你在这两个事件上原有的 hook，遇到解析不了的设置文件会拒绝写入，并在旁边留一份
+`.jev-bak`。**下个会话才生效**，跑它的那个会话里看不到。
 
 要求 Node 18 以上（用到内置 `fetch`），除此之外没有依赖。任何支持 skills 的 agent 都能用——Claude
 Code、Codex、Cursor 读的是同一份 `SKILL.md`，按路径调脚本。
@@ -58,20 +64,21 @@ Code、Codex、Cursor 读的是同一份 `SKILL.md`，按路径调脚本。
 git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
 ```
 
-**卸载。** 只删 skill 不够——安装时写进去的密钥、配置，还有最多两个 hook，都在 skill 目录之外，而
-两个 hook 都是按路径指向脚本的：pre-commit 那个在脚本没了之后会让每次提交都失败，`SessionStart`
-那个会让每个会话都失败。把下面这段发给 agent，完整清单在 `SKILL.md` 里：
+**卸载。** 只删 skill 不够——安装时写进去的密钥、配置，还有最多三个 hook，都在 skill 目录之外，而每个
+hook 都是按路径指向脚本的：pre-commit 那个在脚本没了之后会让每次提交都失败，`SessionStart` 那个会让
+每个会话都失败，`PreToolUse` 那个会让每次 shell 和搜索调用都失败。把下面这段发给 agent，完整清单在
+`SKILL.md` 里：
 
 ```
 按 jev-assist 的 SKILL.md 里 Uninstall 那节把这个 skill 卸载掉：pre-commit hook、
-SessionStart hook、存下来的密钥、所有 JEV_ 环境变量、每个仓库里的配置和产出，以及 skill
-本身。不确定的先给我看再删。
+SessionStart 和 PreToolUse hook、存下来的密钥、所有 JEV_ 环境变量、每个仓库里的配置和产出，
+以及 skill 本身。不确定的先给我看再删。
 ```
 
 手动，先卸 hook——趁脚本还在，还跑得起来：
 
 ```sh
-node <skill 目录>/scripts/install-hook.mjs --remove   # 摘掉 SessionStart hook
+node <skill 目录>/scripts/install-hook.mjs --remove   # 摘掉 SessionStart 和 PreToolUse 两个 hook
 rm -f .git/hooks/pre-commit              # 仅当它里面只有 `jev gate`
 rm -f ~/.config/jev/key                  # 每台机器一份（设了 $XDG_CONFIG_HOME 就在那下面）
 rm -f jev.config.json .jev-rerank.json   # 每个被判断的仓库一份，在它的根目录执行

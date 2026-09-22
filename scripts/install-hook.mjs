@@ -1,7 +1,7 @@
 #!/usr/bin/env node
-// Register (or remove) the SessionStart hook in the user's Claude Code settings.
-// `npx skills add` only copies the skill directory, so without this the preflight never
-// reaches a fresh machine. Idempotent: re-running is a no-op.
+// Register (or remove) the two hooks that get this skill reached, in the user's Claude Code
+// settings. `npx skills add` only copies the skill directory, so without this neither reaches a
+// fresh machine. Idempotent: re-running is a no-op.
 //
 // Usage: node scripts/install-hook.mjs [--remove]
 import { readFileSync, writeFileSync, copyFileSync, existsSync } from 'node:fs';
@@ -10,8 +10,13 @@ import { homedir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const settingsPath = join(homedir(), '.claude', 'settings.json');
-const hookScript = fileURLToPath(new URL('session-start.mjs', import.meta.url));
-const command = `node '${hookScript}'`;
+const cmd = (f) => `node '${fileURLToPath(new URL(f, import.meta.url))}'`;
+// SessionStart puts the skill in context; PreToolUse catches the repo-wide search that the
+// context alone never stopped. Matchers differ per event, so each carries its own.
+const HOOKS = [
+  { event: 'SessionStart', script: 'session-start.mjs', matcher: 'startup|clear|compact' },
+  { event: 'PreToolUse', script: 'pretool.mjs', matcher: 'Bash|Grep' },
+];
 const remove = process.argv.includes('--remove');
 
 if (!existsSync(settingsPath)) {
@@ -29,36 +34,38 @@ try {
   process.exit(1);
 }
 
-const isOurs = (h) => typeof h?.command === 'string' && h.command.includes('session-start.mjs');
-const entries = settings.hooks?.SessionStart ?? [];
-const present = entries.some((e) => (e.hooks ?? []).some(isOurs));
+const changed = [];
+for (const { event, script, matcher } of HOOKS) {
+  const isOurs = (h) => typeof h?.command === 'string' && h.command.includes(script);
+  const entries = settings.hooks?.[event] ?? [];
+  const present = entries.some((e) => (e.hooks ?? []).some(isOurs));
+  if (present === !remove) continue; // already in the requested state
 
-if (remove) {
-  if (!present) {
-    console.log('jev: hook not registered, nothing to remove');
-    process.exit(0);
+  if (remove) {
+    const kept = entries
+      .map((e) => ({ ...e, hooks: (e.hooks ?? []).filter((h) => !isOurs(h)) }))
+      .filter((e) => e.hooks.length > 0);
+    if (kept.length) settings.hooks[event] = kept;
+    else delete settings.hooks[event];
+  } else {
+    settings.hooks ??= {};
+    // Unshift so ours lands before unrelated hooks on the same event.
+    settings.hooks[event] = [
+      { matcher, hooks: [{ type: 'command', command: cmd(script), timeout: 10 }] },
+      ...entries,
+    ];
   }
-  const kept = entries
-    .map((e) => ({ ...e, hooks: (e.hooks ?? []).filter((h) => !isOurs(h)) }))
-    .filter((e) => e.hooks.length > 0);
-  if (kept.length) settings.hooks.SessionStart = kept;
-  else delete settings.hooks.SessionStart;
-} else {
-  if (present) {
-    console.log('jev: hook already registered');
-    process.exit(0);
-  }
-  settings.hooks ??= {};
-  // Unshift so the preflight lands before unrelated SessionStart hooks.
-  settings.hooks.SessionStart = [
-    { matcher: 'startup|clear|compact', hooks: [{ type: 'command', command, timeout: 10 }] },
-    ...entries,
-  ];
+  changed.push(event);
+}
+
+if (!changed.length) {
+  console.log(`jev: hooks already ${remove ? 'absent' : 'registered'}, nothing to do`);
+  process.exit(0);
 }
 
 copyFileSync(settingsPath, `${settingsPath}.jev-bak`);
 // Two-space indent is what Claude Code writes; matching it keeps the diff to our own lines.
 writeFileSync(settingsPath, `${JSON.stringify(settings, null, 2)}\n`);
-console.log(`jev: hook ${remove ? 'removed from' : 'registered in'} ${settingsPath}`);
+console.log(`jev: ${changed.join(' + ')} ${remove ? 'removed from' : 'registered in'} ${settingsPath}`);
 console.log(`jev: previous settings saved to ${settingsPath}.jev-bak`);
-if (!remove) console.log('jev: it takes effect in the next session — /clear or start a new one');
+if (!remove) console.log('jev: they take effect in the next session — /clear or start a new one');

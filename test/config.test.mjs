@@ -209,9 +209,76 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
     assert.match(out.hookSpecificOutput.additionalContext, new RegExp(`\`${cmd}\``), `preflight must name ${cmd}`);
 }
 
+// The PreToolUse hook is the one that fires at the moment the reflex does — the SessionStart
+// preflight is injected before the question is asked and lost a session that had it in full.
+// Two failure modes matter: blocking a search it should not (every false positive trains the user
+// to stop reading the reason) and staying silent on the repo-wide sweep it exists for.
+{
+  const hook = fileURLToPath(new URL('../scripts/pretool.mjs', import.meta.url));
+  // Markers outlive the process, so a fixed id would make the second `node test/...` run read
+  // the first run's marker and see every case as already-asked. Unique per run, cleaned at the end.
+  const run_id = `test-${process.pid}-${Date.now()}`;
+  const ids = [];
+  let n = 0;
+  const run = (ev) => {
+    ids.push(ev.session_id);
+    const out = execFileSync(process.execPath, [hook], {
+      encoding: 'utf8', input: JSON.stringify(ev), cwd: '/', stdio: 'pipe',
+    });
+    return out.trim() ? JSON.parse(out) : null;
+  };
+  // A fresh session id per call, or the once-per-session marker swallows every case after the first.
+  const ask = (tool_name, tool_input) => run({ tool_name, tool_input, session_id: `${run_id}-${n++}` });
+
+  const asks = (r, label) => {
+    assert.ok(r, `${label}: must not pass silently`);
+    assert.equal(r.hookSpecificOutput.hookEventName, 'PreToolUse');
+    assert.equal(r.hookSpecificOutput.permissionDecision, 'ask', `${label}: ask, never deny`);
+    assert.match(r.hookSpecificOutput.permissionDecisionReason, /drift|rerank/, `${label}: must name a command`);
+  };
+
+  // The shape from the session that missed: recursive + -l + --include over a tree, and the
+  // count/list-only variants that produce a number rather than something read.
+  asks(ask('Bash', { command: "grep -rl '[一-龥]' src --include='*.tsx'" }), 'grep -rl --include');
+  asks(ask('Bash', { command: 'grep -rc useTranslation src' }), 'grep -rc');
+  asks(ask('Bash', { command: "grep -ro '[a-z]' src -l" }), 'grep -ro -l');
+  // The Grep tool defaults to files_with_matches — a file list, same shape.
+  asks(ask('Grep', { pattern: 'useTranslation' }), 'Grep tool default mode');
+  asks(ask('Grep', { pattern: 'x', output_mode: 'files_with_matches' }), 'Grep files_with_matches');
+
+  // Everything else must pass silently. A hook that interrupts reading is worse than no hook.
+  const passes = [
+    ['Bash', { command: 'grep -n useTranslation src/lang/index.ts' }, 'grep in one named file'],
+    ['Bash', { command: 'grep -rn useTranslation src' }, 'recursive but showing matches, not listing'],
+    ['Bash', { command: 'ls src && cat package.json' }, 'no grep at all'],
+    ['Grep', { pattern: 'x', output_mode: 'content' }, 'Grep content mode reads what it found'],
+    ['Read', { file_path: '/tmp/x' }, 'unrelated tool'],
+    ['Bash', { command: 'git log --oneline -20' }, 'git, not a search'],
+  ];
+  for (const [tool, input, label] of passes)
+    assert.equal(ask(tool, input), null, `${label}: must pass silently`);
+
+  // Once per session: the second broad search under the same id must not ask again.
+  const sid = `${run_id}-same`;
+  const first = run({ tool_name: 'Grep', tool_input: { pattern: 'a' }, session_id: sid });
+  const second = run({ tool_name: 'Grep', tool_input: { pattern: 'b' }, session_id: sid });
+  assert.ok(first, 'first broad search in a session must ask');
+  assert.equal(second, null, 'a second broad search in the same session must not ask again');
+
+  // Malformed or empty stdin must never block a tool call.
+  for (const bad of ['', 'not json', '{"tool_name":"Bash"}', 'null'])
+    assert.equal(
+      execFileSync(process.execPath, [hook], { encoding: 'utf8', input: bad, cwd: '/', stdio: 'pipe' }).trim(),
+      '', `malformed input ${JSON.stringify(bad)} must pass silently`
+    );
+
+  for (const id of ids) rmSync(join(tmpdir(), `jev-asked-${id}`), { force: true });
+}
+
 // install-hook merges into a settings file the user did not write and cannot afford to lose, so
 // the invariants are: never lose a sibling hook, never write invalid JSON, and be idempotent —
-// `npx skills add` runs setup again on every update.
+// `npx skills add` runs setup again on every update. It registers two events; a partial install
+// that silently skips one is the failure that leaves the skill unreached.
 {
   const home = mkdtempSync(join(tmpdir(), 'jev-hookinst-'));
   const dir = join(home, '.claude');
@@ -222,24 +289,37 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
     encoding: 'utf8', env: { ...process.env, HOME: home }, stdio: 'pipe',
   });
   const read = () => JSON.parse(readFileSync(settings, 'utf8'));
-  const ours = (d) => (d.hooks?.SessionStart ?? [])
+  const ours = (event, script) => (read().hooks?.[event] ?? [])
     .flatMap((e) => e.hooks ?? [])
-    .filter((h) => h.command?.includes('session-start.mjs'));
+    .filter((h) => h.command?.includes(script));
+  const bothOurs = () => [
+    ...ours('SessionStart', 'session-start.mjs'),
+    ...ours('PreToolUse', 'pretool.mjs'),
+  ];
 
-  const original = { model: 'x', hooks: { SessionStart: [{ hooks: [{ type: 'command', command: 'other --hi' }] }] } };
+  const original = {
+    model: 'x',
+    hooks: {
+      SessionStart: [{ hooks: [{ type: 'command', command: 'other --hi' }] }],
+      PreToolUse: [{ matcher: 'Write', hooks: [{ type: 'command', command: 'lint --check' }] }],
+    },
+  };
   writeFileSync(settings, JSON.stringify(original, null, 2));
 
   install();
-  assert.equal(ours(read()).length, 1, 'install must register the hook');
+  assert.equal(bothOurs().length, 2, 'install must register both hooks');
   assert.equal(read().model, 'x', 'install must not drop unrelated settings');
   assert.equal(read().hooks.SessionStart.length, 2, 'install must keep a sibling SessionStart hook');
+  assert.equal(read().hooks.PreToolUse.length, 2, 'install must keep a sibling PreToolUse hook');
+  // A PreToolUse hook with no matcher runs on every tool; ours must be scoped to the search tools.
+  assert.match(read().hooks.PreToolUse[0].matcher, /Bash|Grep/, 'our PreToolUse hook must be scoped');
 
   install();
-  assert.equal(ours(read()).length, 1, 'install must be idempotent, not append a second copy');
+  assert.equal(bothOurs().length, 2, 'install must be idempotent, not append a second copy');
 
   install('--remove');
-  assert.equal(ours(read()).length, 0, 'remove must drop the hook');
-  assert.deepEqual(read().hooks.SessionStart, original.hooks.SessionStart, 'remove must restore the original entries');
+  assert.equal(bothOurs().length, 0, 'remove must drop both hooks');
+  assert.deepEqual(read().hooks, original.hooks, 'remove must restore the original entries');
 
   // A refusal, not a half-written file: a broken settings.json breaks every future session.
   writeFileSync(settings, '{oops');
