@@ -187,6 +187,11 @@ assert.ok(keyPath({}).endsWith('/.config/jev/key'));
   assert.doesNotMatch(value.slice(1, -1), /(?<!\\)"/, 'inner quotes in the description must be backslash-escaped');
   for (const cmd of ['rerank', 'drift', 'gate', 'validate'])
     assert.match(description, new RegExp(`\`${cmd}\``), `description must say when to reach for ${cmd}`);
+  // The description must fire the skill on the question's shape, BEFORE any search. A description
+  // whose first instruction is "grep first" conditions the load on evidence that only exists after
+  // the work the skill replaces, so the agent iterates on grep exclusions and never loads at all.
+  // Two sessions died exactly this way. Probe-routing belongs in the body, not the trigger.
+  assert.match(description, /BEFORE searching/, 'description must say to load before searching, not after a probe');
 }
 
 console.log('ok');
