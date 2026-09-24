@@ -1,22 +1,23 @@
 #!/usr/bin/env node
-// jev-assist — typed judgments over a codebase, via TypeSafe Jev.
-//   rerank "<task>"   score every tracked file for relevance to a task (--json to dump the full ranking)
-//   drift [glob]      scan files for convention drift
-//   gate [ref]        judge a diff for risks linters cannot see
-//   validate [n]      measure rerank recall against your own commit history
-//   check             verify the stored key and the config's shape, offline
-//   key <API_KEY>     store a key outside the repo at 0600
-// Conventions and exemptions come from jev.config.json in the repo root.
-// ponytail: sequential calls, no backoff. Add p-limit + 429 retry when pools exceed ~50 batches.
+// jev — three typed judgments over a flood of candidates, via TypeSafe Jev.
+// Candidates come in on stdin, one per line — the raw output of grep, glob, git,
+// a test runner. What comes back is one calibrated number per candidate, sorted,
+// with the total exact in a banner above the data and a cut line through it, so
+// the reply is shorter than the input at any pool size.
+//   key <API_KEY>               store the key outside the repo at 0600
+//   noul '<statement>'          0-1 per candidate: is this one the real thing?
+//   choice '<q>' --opt n:d ...  a label per candidate from a fixed set of options
+//   score '<q>' --level n:d ... a rubric level per candidate
+// Shared flags: --top N (rows above the cut), --by-file/--by-dir [N] (census of the
+// selected rows by path), --json (every row), --fresh (skip cache reads).
+// Finding candidates stays your job — grep, glob, git. This decides what each hit is.
+// ponytail: the cache grows without eviction; if it ever matters, cap it by age at load.
 import { readFile, writeFile, mkdir, chmod } from 'node:fs/promises';
-import { realpathSync } from 'node:fs';
-import { execFile } from 'node:child_process';
-import { promisify } from 'node:util';
+import { createHash } from 'node:crypto';
 import { homedir } from 'node:os';
 import { join, dirname } from 'node:path';
 import { pathToFileURL } from 'node:url';
-
-const exec = promisify(execFile);
+import { realpathSync } from 'node:fs';
 
 const die = (msg) => {
   console.error(`jev: ${msg}`);
@@ -24,23 +25,18 @@ const die = (msg) => {
 };
 
 // ---------------------------------------------------------------- provider
-// Several providers serve Jev. OpenRouter exposes it on its own Decisions endpoint, but the
-// {state, model, questions} body and the {answers} response are byte-identical to direct — so
-// only the URL, the key and the model id differ, making this a lookup rather than a translation
-// layer. OpenRouter keys are recognisable by prefix; anything else is treated as direct.
-// OpenRouter's optional HTTP-Referer / X-OpenRouter-Title ranking headers are skipped: a CLI
-// has no site to rank. A provider that ever diverges in body shape needs a real adapter here.
+// OpenRouter serves Jev on its Decisions endpoint; the {state, model, questions}
+// body and {answers} response are identical to direct, so only url/key/model differ,
+// selected by key prefix. JEV_API_URL / JEV_MODEL override for a gateway or a pin.
 export const provider = (key, env = {}) => {
   const or = key.startsWith('sk-or-');
   return {
     name: env.JEV_API_URL ? 'custom' : or ? 'openrouter' : 'typesafe',
     url: env.JEV_API_URL ?? (or ? 'https://openrouter.ai/api/alpha/decisions' : 'https://api.typesafe.ai/v1/systemone'),
-    // `~` marks OpenRouter's floating alias, matching `jev-latest` direct. Pin with JEV_MODEL.
     model: env.JEV_MODEL ?? (or ? '~typesafe/jev-latest' : 'jev-latest'),
   };
 };
 
-// Stored outside the repo: a key in the working tree gets committed sooner or later.
 export const keyPath = (env = process.env) =>
   join(env.XDG_CONFIG_HOME || join(homedir(), '.config'), 'jev', 'key');
 
@@ -53,7 +49,7 @@ async function apiKey() {
   }
 }
 
-async function ask(state, questions) {
+async function ask(state, model, questions) {
   const key = await apiKey();
   if (!key) die(`no API key. Run \`jev key <API_KEY>\`, or set JEV_API_KEY (looked in ${keyPath()})`);
   const p = provider(key, process.env);
@@ -65,75 +61,429 @@ async function ask(state, questions) {
   });
   const ms = Math.round(performance.now() - t0);
   const body = await res.text();
+  // `max_tokens_exceeded` is the one failure the caller can fix (it chose the batch
+  // size), so it is thrown for `judge` to halve and retry. Everything else is fatal.
+  if (res.status === 400 && body.includes('max_tokens_exceeded')) throw new Error('max_tokens_exceeded');
   if (!res.ok) die(`${res.status} ${body.slice(0, 400)}`);
-  const json = JSON.parse(body);
-  return { ...json, ms };
+  return { ...(await JSON.parse(body)), ms };
 }
 
-async function config() {
+// ---------------------------------------------------------------- cache
+// Jev is self-consistent (stable across repeated evaluations), so caching a verdict
+// is sound, not a shortcut. On by default; `--fresh` recomputes, and its fresh
+// verdicts still merge into the file — nothing already cached is evicted.
+export const cachePath = (env = process.env) =>
+  join(env.XDG_CACHE_HOME || join(homedir(), '.cache'), 'jev', 'cache.json');
+
+export const cacheKey = (model, cmd, spec, line) =>
+  createHash('sha256').update([model, cmd, spec, line].join('\x1f')).digest('hex');
+
+async function loadCache() {
   try {
-    return JSON.parse(await readFile('jev.config.json', 'utf8'));
+    const c = JSON.parse(await readFile(cachePath(), 'utf8'));
+    return c?.version === 1 && c.entries ? c.entries : {};
   } catch {
-    die('no jev.config.json in the current directory (see README)');
+    return {};
   }
 }
 
-// A git failure (outside a repo, zero-commit log, bad ref) must die with the clean `jev:` line,
-// not a raw unhandled rejection — the caller's exit code is right either way, the output is not.
-const git = async (args) => {
-  try {
-    return (await exec('git', args, { maxBuffer: 1 << 28 })).stdout;
-  } catch (e) {
-    // stderr is a Buffer here (execFile runs without an encoding); first line carries the cause
-    die(`git ${args[0]} failed: ${(e.stderr?.toString() || e.message).trim().split('\n')[0]}`);
+// ---------------------------------------------------------------- batching
+// Questions in one request are bounded by tokens, not by count: 800 short lines went
+// through in one call at 59k input tokens, 1500 came back max_tokens_exceeded. The
+// documented 255 is the option limit of one Choice question — a different axis.
+// ~74 tokens per question measured; the line's own text is a dozen of those, the
+// question scaffolding is the bulk. 2 chars/token splits the difference between
+// ASCII source (~4:1) and CJK (~1:1).
+const TOKEN_BUDGET = 45_000;
+const tokens = (l) => 70 + l.length / 2;
+export const batchByTokens = (lines, budget = TOKEN_BUDGET) => {
+  const out = [];
+  let cur = [];
+  let n = 0;
+  for (const l of lines) {
+    // A single line over budget still ships alone — one call that may fail loudly
+    // beats a line silently dropped from the count.
+    if (cur.length && n + tokens(l) > budget) (out.push(cur), (cur = []), (n = 0));
+    cur.push(l);
+    n += tokens(l);
+  }
+  if (cur.length) out.push(cur);
+  return out;
+};
+
+// ---------------------------------------------------------------- candidates
+export const readStdin = async () => {
+  if (process.stdin.isTTY) die('no candidates on stdin. Pipe them in, one per line:\n  grep -rn "TODO" src | jev noul \'this TODO is still valid\'');
+  const text = await new Promise((resolve, reject) => {
+    let s = '';
+    process.stdin.setEncoding('utf8');
+    process.stdin.on('data', (d) => (s += d));
+    process.stdin.on('end', () => resolve(s));
+    process.stdin.on('error', reject);
+  });
+  // grep output carries a trailing newline; blank lines are not candidates.
+  // Duplicates collapse with the count kept — two identical lines are one judgment,
+  // and every total stays exact by naming both numbers.
+  const all = text.split('\n').filter((l) => l.trim());
+  const seen = new Map();
+  for (const l of all) seen.set(l, (seen.get(l) ?? 0) + 1);
+  const lines = [...seen.keys()];
+  if (!lines.length) die('no candidates on stdin (the input was empty or blank)');
+  return { lines, dupes: all.length - lines.length };
+};
+
+// ---------------------------------------------------------------- flags
+// Flags may sit anywhere; both `--top 20` and `--top=20` work, because the shell
+// delivers `--opt api:"..."` as two argv entries.
+export class Argv {
+  constructor(argv) {
+    this.a = argv;
+    this.pos = [];
+    this.opts = [];
+    this.levels = [];
+    this.top = null;
+    this.byFile = null;
+    this.byDir = null;
+    this.json = false;
+    this.fresh = false;
+    for (let i = 0; i < this.a.length; i++) {
+      const t = this.a[i];
+      const eq = t.includes('=') ? t.slice(t.indexOf('=') + 1) : null;
+      if (t === '--json') { this.json = true; continue; }
+      if (t === '--fresh') { this.fresh = true; continue; }
+      if (/^--top(=|$)/.test(t)) {
+        const n = Number(eq ?? this.a[++i]);
+        if (!Number.isInteger(n) || n < 1) die('--top takes a positive count: --top 20');
+        this.top = n;
+        continue;
+      }
+      // --by-file/--by-dir take an optional cap: a following integer is the cap,
+      // anything else (the question, another flag) leaves the default.
+      if (/^--by-(file|dir)(=|$)/.test(t)) {
+        const v = eq ?? this.a[i + 1];
+        this[t.startsWith('--by-file') ? 'byFile' : 'byDir'] =
+          /^\d+$/.test(v ?? '') ? Number(eq ?? this.a[++i]) : 15;
+        continue;
+      }
+      if (/^--opt(=|$)/.test(t)) {
+        const v = eq ?? this.a[++i];
+        if (v === undefined) die('--opt needs a value: --opt name:criteria');
+        this.opts.push(v);
+        continue;
+      }
+      if (/^--level(=|$)/.test(t)) {
+        const v = eq ?? this.a[++i];
+        if (v === undefined) die('--level needs a value: --level 2:criteria');
+        this.levels.push(v);
+        continue;
+      }
+      this.pos.push(t);
+    }
+  }
+}
+
+// Split on the FIRST colon: criteria text is prose and may hold colons of its own.
+export const parseOpt = (s, what) => {
+  const i = s.indexOf(':');
+  if (i < 1) die(`${what} needs name:criteria — '${s}' has no colon separating them`);
+  return [s.slice(0, i), s.slice(i + 1).trim()];
+};
+
+export const parseOpts = (raw, what, flag) => {
+  if (raw.length < 2) die(`${what} needs at least two options (a judgment between one option and nothing is not a judgment):\n  ${flag} name:criteria ${flag} other:criteria`);
+  const seen = new Set();
+  const out = [];
+  for (const r of raw) {
+    const [name, desc] = parseOpt(r, flag);
+    if (seen.has(name)) die(`${flag} '${name}' given twice; options must be distinct`);
+    if (!desc) die(`${flag} ${name}: criteria must be non-empty — it is what separates ${name} from the others`);
+    seen.add(name);
+    out.push([name, desc]);
+  }
+  return out;
+};
+
+export const parseLevels = (raw) => {
+  if (!raw.length) die('score needs at least one level: --level 0:criteria --level 1:criteria');
+  const byNum = new Map();
+  for (const r of raw) {
+    const [n, desc] = parseOpt(r, '--level');
+    const num = Number(n);
+    if (!Number.isInteger(num) || num < 0) die(`--level takes a non-negative integer before the colon, got '${n}'`);
+    if (byNum.has(num)) die(`--level ${num} given twice`);
+    if (!desc) die(`--level ${num}: criteria must be non-empty — it is what that level means`);
+    byNum.set(num, desc);
+  }
+  return [...byNum].sort((a, b) => a[0] - b[0]);
+};
+
+// ---------------------------------------------------------------- answer readers
+// Typed in, typed out — but the field names at the edge are the provider's, and a
+// renamed field must fail loudly here rather than print `undefined` as a score.
+export const readNoul = (a) => {
+  const p = a?.noul ?? a?.probability;
+  if (typeof p !== 'number') die(`unexpected noul answer: ${JSON.stringify(a)?.slice(0, 200)}`);
+  return { p };
+};
+export const readChoice = (a) => {
+  const label = a?.choice ?? a?.label ?? a?.option ?? a?.value;
+  if (typeof label !== 'string') die(`unexpected choice answer (no label field): ${JSON.stringify(a)?.slice(0, 200)}`);
+  const p = a?.probability ?? a?.confidence;
+  return { label, p: typeof p === 'number' ? p : 1 };
+};
+export const readScore = (a) => {
+  const s = a?.score;
+  if (typeof s !== 'number') die(`unexpected score answer: ${JSON.stringify(a)?.slice(0, 200)}`);
+  return { s };
+};
+
+// ---------------------------------------------------------------- the one judgment path
+// Candidates ride in as N questions over one state; the shared question text sits in
+// `state` once, not repeated per question. Concurrency 8 over a batch cursor, rows
+// printed in input order. `max_tokens_exceeded` halves the slice and retries — the
+// token estimate above is calibrated on one shape of line and will mis-estimate
+// another (minified bundles, base64); a single line that still cannot fit dies
+// loudly rather than dropping out of the count.
+async function judge(cmd, state, model, spec, lines, makeQuestion, read, cache, progress) {
+  const batches = batchByTokens(lines);
+  const out = new Array(batches.length);
+  let next = 0;
+  let done = 0;
+  let ms = 0;
+  let inTok = 0;
+  let calls = 0;
+
+  const one = async (slice) => {
+    const questions = Object.fromEntries(slice.map((l, n) => [`q${n}`, makeQuestion(l)]));
+    try {
+      const r = await ask(state, model, questions);
+      ms += r.ms;
+      inTok += r.usage?.input_tokens ?? 0;
+      calls++;
+      return slice.map((l, n) => read(r.answers[`q${n}`]));
+    } catch (e) {
+      if (e.message !== 'max_tokens_exceeded') throw e;
+      if (slice.length === 1)
+        die(`one candidate alone exceeds the request limit, so it cannot be judged:\n  ${slice[0].slice(0, 200)}`);
+      progress(`  ${slice.length} candidates over the limit, splitting`);
+      const half = slice.length >> 1;
+      const [a, b] = await Promise.all([one(slice.slice(0, half)), one(slice.slice(half))]);
+      return [...a, ...b];
+    }
+  };
+
+  const worker = async () => {
+    for (let b = next++; b < batches.length; b = next++) {
+      const slice = batches[b];
+      const hits = slice.map((l) => cache.get(cacheKey(model, cmd, spec, l)));
+      const missIdx = hits.map((h, i) => (h === undefined ? i : -1)).filter((i) => i >= 0);
+      if (missIdx.length) {
+        const got = await one(missIdx.map((i) => slice[i]));
+        missIdx.forEach((idx, n) => {
+          cache.set(cacheKey(model, cmd, spec, slice[idx]), got[n]);
+          hits[idx] = got[n];
+        });
+      }
+      out[b] = slice.map((l, n) => ({ line: l, ...hits[n] }));
+      done += slice.length;
+      if (missIdx.length) progress(`  ${done}/${lines.length} judged`);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.min(8, batches.length) }, worker));
+  return { rows: out.flat(), ms, inTok, calls };
+}
+
+// ---------------------------------------------------------------- cut
+// Where to stop reading. The cliff is the widest gap in the sorted probabilities —
+// what calibration is for. Guards: a pool big enough for a gap to mean something,
+// a gap big enough to be one, never a cut inside the top 3. `--top N` overrides.
+export const cut = (ps, top) => {
+  if (top != null) return { at: Math.min(top, ps.length), why: `--top ${top}` };
+  const desc = [...ps].sort((a, b) => b - a);
+  if (desc.length >= 8) {
+    let best = -1;
+    let gap = 0;
+    for (let i = 3; i <= desc.length - 3; i++) {
+      const g = desc[i - 1] - desc[i];
+      if (g > gap) ((gap = g), (best = i));
+    }
+    if (gap >= 0.25) return { at: best, why: `cliff ${desc[best - 1].toFixed(2)}→${desc[best].toFixed(2)}` };
+  }
+  const t = desc.filter((p) => p >= 0.7).length;
+  if (t) return { at: t, why: 'p >= 0.70' };
+  return { at: Math.min(10, desc.length), why: 'no cliff, no p >= 0.70 — top 10' };
+};
+
+// ---------------------------------------------------------------- census
+// jev already holds a verdict per row, so "where do they live" is arithmetic, not
+// another call: group the selected rows by the path before the first colon (grep's
+// `path:line:…` shape; a line with no colon is its own path) and count. Every total
+// is exact — the rest beyond the cap is summed and named, never dropped.
+// ponytail: POSIX separator assumed — a pool of `a\b` paths groups as one; and
+// groups count rows only, no per-label breakdown. Add either when a task needs it.
+export const pathPrefix = (line) => {
+  const c = line.indexOf(':');
+  return c > 0 ? line.slice(0, c) : line;
+};
+
+export const groupByPath = (rows, mode, cap) => {
+  const m = new Map();
+  for (const r of rows) {
+    const p = pathPrefix(r.line);
+    const k = mode === 'dir' ? p.slice(0, p.lastIndexOf('/')) || '.' : p;
+    m.set(k, (m.get(k) ?? 0) + 1);
+  }
+  const groups = [...m].sort((a, b) => b[1] - a[1] || (a[0] < b[0] ? -1 : 1));
+  return {
+    groupCount: groups.length,
+    selected: rows.length,
+    top: groups.slice(0, cap),
+    rest: groups.slice(cap),
+  };
+};
+
+// ---------------------------------------------------------------- output
+// Rows are TSV, the line JSON-quoted, so a line holding tabs or colons still
+// round-trips through awk or cut.
+const fmtRow = (r, levels) => {
+  const text = JSON.stringify(r.line);
+  if (r.p !== undefined && r.label !== undefined) return `${r.p.toFixed(2)}\t${r.label}\t${text}`;
+  if (r.label !== undefined) return `${r.label}\t${text}`;
+  if (r.p !== undefined) return `${r.p.toFixed(2)}\t${text}`;
+  const lv = levels?.find(([n]) => n === Math.round(r.s));
+  return `${r.s.toFixed(2)}\tL${Math.round(r.s)}${lv ? ` (${lv[1]})` : ''}\t${text}`;
+};
+
+const ROW_CAP = 50;
+const printRows = (rows, levels, note) => {
+  for (const r of rows.slice(0, ROW_CAP)) console.log(fmtRow(r, levels));
+  if (rows.length > ROW_CAP)
+    console.log(`  … ${rows.length - ROW_CAP} more row(s) ${note} — --json prints every row; a re-run is a cache hit`);
+};
+
+// Census of the rows the answer points at (above the cut for noul; all of them for
+// choice/score, which has no cut). JSON gets the slim shape; text gets the table.
+const censusOf = (argv, selected) => {
+  if (!argv.byDir && !argv.byFile) return null;
+  return {
+    ...(argv.byDir ? { byDir: groupByPath(selected, 'dir', argv.byDir) } : {}),
+    ...(argv.byFile ? { byFile: groupByPath(selected, 'file', argv.byFile) } : {}),
+  };
+};
+const slimCensus = (g) => ({
+  groups: g.groupCount,
+  selected: g.selected,
+  top: g.top.map(([k, n]) => ({ [k]: n })),
+  ...(g.rest.length
+    ? { restGroups: g.rest.length, restRows: g.rest.reduce((s, [, n]) => s + n, 0) }
+    : {}),
+});
+const printCensus = (census) => {
+  if (!census) return;
+  for (const [label, g] of [['by dir', census.byDir], ['by file', census.byFile]]) {
+    if (!g) continue;
+    console.log(`  ${label}: ${g.groupCount} group(s) holding ${g.selected} selected row(s); top ${g.top.length}:`);
+    for (const [k, n] of g.top) console.log(`    ${n}\t${k}`);
+    if (g.rest.length)
+      console.log(`    ${g.rest.reduce((s, [, n]) => s + n, 0)}\t… ${g.rest.length} more group(s)`);
   }
 };
 
-// `git ls-files` pathspecs are NOT globs: by default `**` needs an intervening directory, so
-// `src/**/*.ts` silently skips `src/main.ts`. The `:(glob)` prefix gives real glob semantics.
-// Left alone if the caller already supplied pathspec magic.
-export const pathspec = (p) => (p.startsWith(':') ? p : `:(glob)${p}`);
-const tracked = async (globs) =>
-  (await git(['ls-files', ...globs.map(pathspec)])).trim().split('\n').filter(Boolean);
+async function run(cmd, question, spec, makeQuestion, read, levels, argv) {
+  const { lines, dupes } = await readStdin();
+  const key = await apiKey();
+  if (!key) die(`no API key. Run \`jev key <API_KEY>\`, or set JEV_API_KEY (looked in ${keyPath()})`);
+  const model = provider(key, process.env).model;
 
-// Exemptions are per-convention path substrings: a flag on an exempt path is dropped.
-export const exempt = (cfg, key, path) => (cfg.exemptions?.[key] ?? []).some((frag) => path.includes(frag));
+  // --fresh bypasses reads (every line re-judged) but never the merge: what is
+  // already on disk belongs to other questions and pools, not to this run.
+  const disk = await loadCache();
+  const stored = argv.fresh ? {} : disk;
+  const cache = new Map();
+  for (const l of lines) {
+    const h = cacheKey(model, cmd, spec, l);
+    if (stored[h] !== undefined) cache.set(h, stored[h]);
+  }
+  const hits = cache.size;
 
-export const bar = (p) => (p >= 0.7 ? '!' : p >= 0.4 ? '?' : ' ');
+  const t0 = performance.now();
+  const { rows, ms, inTok, calls } = await judge(
+    cmd, { question }, model, spec, lines, makeQuestion, read, cache,
+    // Live progress is for a watching eye only; redirected stderr collects the
+    // banner alone, so a file (or a pipe) never fills with `N/M judged` lines.
+    (s) => { if (process.stderr.isTTY) process.stderr.write(`${s}\n`); }
+  );
+  const wall = Math.round(performance.now() - t0);
 
-// ---------------------------------------------------------------- check
-// Shape only. A config can pass every line here and still ask the wrong questions —
-// that is what the human review and `jev validate` are for.
-export function configProblems(cfg) {
-  const out = [];
-  if (typeof cfg.description !== 'string' || cfg.description.length < 20)
-    out.push('description: missing, or too short to orient the model');
-  if (/REPLACE ME/i.test(cfg.description ?? '')) out.push('description: still the template placeholder');
-  if (!Array.isArray(cfg.include) || !cfg.include.length) out.push('include: must be a non-empty array of globs');
-
-  for (const group of ['conventions', 'gates']) {
-    const entries = Object.entries(cfg[group] ?? {});
-    if (!entries.length) out.push(`${group}: empty, so those checks do nothing`);
-    const flag = group === 'conventions' ? 'drift' : 'risk';
-    for (const [key, v] of entries) {
-      for (const f of ['ask', flag, 'ok']) {
-        if (typeof v?.[f] !== 'string' || v[f].length <= 10)
-          out.push(`${group}.${key}.${f}: missing, or too short to steer the model`);
-      }
-      if (typeof v?.ask === 'string' && !v.ask.includes('?'))
-        out.push(`${group}.${key}.ask: must be phrased as a question`);
-    }
+  // Merge over what was on disk: this run's lines must not evict anyone else's.
+  if (cache.size > hits) {
+    const entries = { ...disk, ...Object.fromEntries(cache) };
+    await mkdir(dirname(cachePath()), { recursive: true, mode: 0o700 });
+    await writeFile(cachePath(), JSON.stringify({ version: 1, entries }));
   }
 
-  for (const key of Object.keys(cfg.exemptions ?? {}))
-    if (!cfg.conventions?.[key]) out.push(`exemptions.${key}: names no convention, so it silently does nothing`);
+  const banner =
+    `jev ${cmd} · ${lines.length} candidate(s)${dupes ? ` (${dupes} duplicate line(s) collapsed)` : ''}` +
+    ` · ${calls} call(s) · ${wall}ms · ${inTok} input tok · ${hits}/${lines.length} cache hit(s)\n` +
+    `  "${question}"`;
 
-  return out;
+  if (cmd === 'noul') {
+    rows.sort((a, b) => b.p - a.p);
+    const c = cut(rows.map((r) => r.p), argv.top);
+    const yes = rows.filter((r) => r.p >= 0.7).length;
+    // The headline rides the banner in every mode. A consumer re-deriving it
+    // from rows references `cut` inside `.rows[]`, where it is null — and any
+    // comparison against that null lies silently (`p >= null` keeps every row,
+    // `p < null` keeps none). Truth ships beside whatever recomputes it.
+    const headline = `yes ${yes} / ${rows.length} at p >= 0.70`;
+    const census = censusOf(argv, rows.slice(0, c.at));
+    if (argv.json) {
+      process.stderr.write(`${banner}\n  ${headline}\n`); // metadata, not data — stdout stays pure JSON so `| jq` just works
+      console.log(JSON.stringify({ cmd, question, total: rows.length, yes, cut: c,
+        ...(census?.byDir ? { byDir: slimCensus(census.byDir) } : {}),
+        ...(census?.byFile ? { byFile: slimCensus(census.byFile) } : {}), rows }, null, 1));
+      return;
+    }
+    console.log(`${banner}\n  ${headline}`);
+    printCensus(census);
+    if (c.at < rows.length)
+      console.log(`  --- cut: read above (${c.at} row(s); ${c.why}; ${rows.length - c.at} below) ---`);
+    printRows(rows.slice(0, c.at), levels, 'above the cut');
+    return;
+  }
+
+  // choice/score are labels, not one continuum, so there is no global cut: group by
+  // the answer itself — every group's count is in the banner, so nothing hides.
+  const getKey = cmd === 'choice' ? (r) => r.label : (r) => `L${Math.round(r.s)}`;
+  const groups = new Map();
+  for (const r of rows) {
+    const k = getKey(r);
+    if (!groups.has(k)) groups.set(k, []);
+    groups.get(k).push(r);
+  }
+  const order =
+    cmd === 'choice'
+      ? [...groups].sort((a, b) => b[1].length - a[1].length)
+      : [...groups].sort((a, b) => Number(b[0].slice(1)) - Number(a[0].slice(1)));
+  const headline = order.map(([k, g]) => `${k} ${g.length}`).join('  ·  ');
+  const census = censusOf(argv, rows);
+  if (argv.json) {
+    process.stderr.write(`${banner}\n  ${headline}\n`); // metadata, not data — stdout stays pure JSON so `| jq` just works
+    console.log(JSON.stringify({ cmd, question, total: rows.length, groups: order.map(([k, g]) => ({ [k]: g.length })),
+      ...(census?.byDir ? { byDir: slimCensus(census.byDir) } : {}),
+      ...(census?.byFile ? { byFile: slimCensus(census.byFile) } : {}), rows }, null, 1));
+    return;
+  }
+  console.log(`${banner}\n  ${headline}`);
+  printCensus(census);
+  for (const [k, g] of order) {
+    g.sort((a, b) => (b.p ?? b.s) - (a.p ?? a.s));
+    console.log(`\n[${k}]  ${g.length} candidate(s)`);
+    printRows(g, levels, `in ${k}`);
+  }
 }
 
 // ---------------------------------------------------------------- key
-// Takes the key as an argument so an agent can store it for the user in one call. It lands
-// outside the repo (never in the working tree) and 0600, and is echoed back masked.
 async function key(value) {
   const k = value?.trim();
   if (!k) die('usage: jev key <API_KEY>   (stores it outside the repo, 0600)');
@@ -148,234 +498,34 @@ async function key(value) {
   console.log('  JEV_API_KEY in the environment still wins if set.');
 }
 
-async function check() {
-  const k = await apiKey();
-  if (!k) console.log(`\n  no API key — run \`jev key <API_KEY>\` (looked in ${keyPath()})`);
+const usage = () =>
+  die(
+    'usage:\n' +
+      '  jev key <API_KEY>\n' +
+      "  ...candidates | jev noul '<statement about one candidate>'\n" +
+      "  ...candidates | jev choice '<question>' --opt name:criteria [--opt ...]\n" +
+      "  ...candidates | jev score '<question>' --level 0:criteria [--level ...]\n" +
+      '  flags: --top N · --by-file/--by-dir [N] (census of selected rows by path) · --json (every row) · --fresh (recompute, skip cache reads)'
+  );
+
+// Only dispatch when run as a CLI; tests import the helpers above.
+if (process.argv[1] && import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
+  const [cmd, ...rest] = process.argv.slice(2);
+  if (cmd === 'key') await key(rest[0]);
+  else if (cmd !== 'noul' && cmd !== 'choice' && cmd !== 'score') usage();
   else {
-    const p = provider(k, process.env);
-    console.log(`\n  key ${k.slice(0, 6)}…${k.slice(-4)}  provider ${p.name} → ${p.url} (model ${p.model})`);
-  }
-
-  const cfg = await config();
-  const problems = configProblems(cfg);
-
-  // An include glob matching nothing is the one fault that wastes money quietly: rerank and
-  // drift score an empty pool and report success. Counting is the only way to see it.
-  const globs = Array.isArray(cfg.include) ? cfg.include : [];
-  const hits = new Set(); // a Set, because overlapping globs would otherwise be counted twice
-  for (const g of globs) {
-    const found = await tracked([g]);
-    if (!found.length) problems.push(`include: "${g}" matches no tracked file`);
-    for (const f of found) hits.add(f);
-  }
-  const matched = hits.size;
-
-  if (!problems.length) {
-    console.log(`\n  jev.config.json is well-formed. include matches ${matched} tracked file(s).`);
-    console.log('  Shape only — run `jev validate` and read the questions yourself before trusting them.');
-    if (!k) process.exitCode = 1;
-    return;
-  }
-  console.log(`\n  ${problems.length} problem(s):`);
-  for (const p of problems) console.log(`    - ${p}`);
-  process.exitCode = 1;
-}
-
-// ---------------------------------------------------------------- rerank
-const LEVELS = [
-  'Unrelated: no reason to open this file for the task.',
-  'Background only: same app, but not touched and not a pattern to copy.',
-  'Useful precedent: not touched, but shows the existing pattern to follow.',
-  'Directly involved: likely must be read or edited to do the task.',
-];
-
-// Score every file for one task, highest first. Shared by rerank and validate.
-async function score(task, files, cfg, quiet) {
-  const batch = cfg.batchSize ?? 60;
-  const rows = [];
-  let ms = 0;
-  let tokens = 0;
-
-  for (let i = 0; i < files.length; i += batch) {
-    const slice = files.slice(i, i + batch);
-    const questions = Object.fromEntries(
-      slice.map((path, n) => [
-        `f${n}`,
-        { type: 'score', instructions: { path, question: 'How relevant is this file to the task?' }, criteria: LEVELS },
-      ])
-    );
-    const r = await ask({ task, repo: cfg.description ?? '' }, questions);
-    slice.forEach((path, n) => rows.push({ path, ...r.answers[`f${n}`] }));
-    ms += r.ms;
-    tokens += r.usage.input_tokens;
-    if (!quiet) {
-      process.stderr.write(`  batch ${Math.floor(i / batch) + 1}/${Math.ceil(files.length / batch)}  ${r.ms}ms\n`);
+    const argv = new Argv(rest);
+    const question = argv.pos[0];
+    if (!question) die(`${cmd} needs the question as the first argument, then candidates on stdin`);
+    if (cmd === 'noul')
+      await run('noul', question, question, (l) => ({ type: 'noul', instructions: l, criteria: { true: 'yes', false: 'no' } }), readNoul, null, argv);
+    else if (cmd === 'choice') {
+      const opts = parseOpts(argv.opts, 'choice', '--opt');
+      const criteria = Object.fromEntries(opts);
+      await run('choice', question, `${question}\x1f${JSON.stringify(criteria)}`, (l) => ({ type: 'choice', instructions: l, criteria }), readChoice, opts, argv);
+    } else {
+      const levels = parseLevels(argv.levels);
+      await run('score', question, `${question}\x1f${JSON.stringify(levels)}`, (l) => ({ type: 'score', instructions: l, criteria: levels.map(([, d]) => d) }), readScore, levels, argv);
     }
   }
-
-  rows.sort((a, b) => b.score - a.score);
-  return { rows, ms, tokens };
-}
-
-async function rerank(task, json) {
-  if (!task) die('rerank needs a task description');
-  const cfg = await config();
-  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
-  const { rows, ms, tokens } = await score(task, files, cfg);
-  const top = rows.slice(0, cfg.topN ?? 20);
-  console.log(`\n${files.length} files, ${ms}ms, ${tokens} input tokens\n`);
-  for (const r of top) console.log(`  ${r.score.toFixed(2)}  ${r.path}`);
-  console.log(
-    `\n  Scores are levels 0-${LEVELS.length - 1}: ${LEVELS.length - 1} = must edit, ${LEVELS.length - 2} = existing pattern to copy, 1 = background.\n` +
-      '  Read >=2.5 first. A flat top-20 means nothing stood out, not that all 20 are candidates.\n' +
-      '  Not exhaustive. Before you finish: git grep the symbol you added for every declaration\n' +
-      '  and wrapper site. Those files change only by reference and can rank anywhere.'
-  );
-  // The printed top N is the whole point; the full ranking is only worth a file when
-  // something will read past the cutoff. Opt in with --json.
-  if (json) {
-    await writeFile('.jev-rerank.json', JSON.stringify(rows, null, 1));
-    console.log('  Full ranking written to .jev-rerank.json');
-  }
-}
-
-// ---------------------------------------------------------------- validate
-// Ground truth from git: a commit message is a task, the files it changed are the answer.
-// Files the commit ADDED are excluded — they did not exist when the task was written, so
-// rerank could never have surfaced them, and counting them inflates recall.
-export const truthFrom = (nameStatus, rankable) =>
-  nameStatus
-    .split('\n')
-    .map((l) => l.split('\t'))
-    .filter(([status, path]) => status && path && status[0] !== 'A' && rankable.has(path))
-    .map(([, path]) => path);
-
-export const recallAt = (ranked, truth, k) => {
-  if (!truth.length) return null;
-  const top = new Set(ranked.slice(0, k));
-  return truth.filter((p) => top.has(p)).length;
-};
-
-async function validate(n) {
-  const count = Number(n ?? 10);
-  if (!Number.isInteger(count) || count < 1) die('validate needs a positive commit count');
-  const cfg = await config();
-  const files = await tracked(cfg.include ?? ['**/*.ts', '**/*.tsx']);
-  const rankable = new Set(files);
-  const ks = cfg.validateK ?? [20, 40];
-
-  const log = (await git(['log', '-n', String(count * 3), '--no-merges', '--format=%H\t%s'])).trim();
-  const commits = log ? log.split('\n').map((l) => l.split('\t')) : [];
-  if (!commits.length) die('no commits to validate against');
-
-  const cases = [];
-  for (const [sha, subject] of commits) {
-    if (cases.length === count) break;
-    if (!subject?.trim()) continue;
-    const truth = truthFrom(await git(['show', '--no-renames', '--name-status', '--format=', sha]), rankable);
-    if (truth.length) cases.push({ sha, subject, truth });
-  }
-  if (!cases.length) die('no commit touched a rankable file; check "include" in jev.config.json');
-
-  console.log(`\n${files.length} rankable files, ${cases.length} commits, ${ks.join('/')} cutoffs\n`);
-  const totals = Object.fromEntries(ks.map((k) => [k, 0]));
-  let truthTotal = 0;
-  let worst = null;
-
-  for (const [i, c] of cases.entries()) {
-    process.stderr.write(`  ${i + 1}/${cases.length}  ${c.sha.slice(0, 8)}\n`);
-    const { rows } = await score(c.subject, files, cfg, true);
-    const ranked = rows.map((r) => r.path);
-    c.hits = Object.fromEntries(ks.map((k) => [k, recallAt(ranked, c.truth, k)]));
-    truthTotal += c.truth.length;
-    for (const k of ks) totals[k] += c.hits[k];
-    const rate = c.hits[ks[0]] / c.truth.length;
-    if (!worst || rate < worst.rate) worst = { ...c, rate };
-  }
-
-  const width = Math.max(...cases.map((c) => Math.min(c.subject.length, 44)));
-  console.log(`  #  ${'task'.padEnd(width)}  truth  ${ks.map((k) => `@${k}`.padStart(4)).join('  ')}`);
-  for (const [i, c] of cases.entries()) {
-    const task = c.subject.length > 44 ? `${c.subject.slice(0, 41)}...` : c.subject;
-    const cells = ks.map((k) => String(c.hits[k]).padStart(4)).join('  ');
-    console.log(`  ${String(i + 1).padStart(1)}  ${task.padEnd(width)}  ${String(c.truth.length).padStart(5)}  ${cells}`);
-  }
-
-  console.log(
-    `\n  ${ks.map((k) => `recall@${k} ${(totals[k] / truthTotal).toFixed(2)}`).join('   ')}` +
-      `   (${truthTotal} files over ${cases.length} commits)`
-  );
-  console.log(`  worst: "${worst.subject.slice(0, 44)}" — ${worst.hits[ks[0]]}/${worst.truth.length}`);
-  console.log(
-    '\n  Recall is micro-averaged over files, so large commits weigh more.\n' +
-      '  Files added by a commit are excluded: rerank could not have found what did not exist.\n' +
-      '  Ranking happens against today\'s tree, so heavily refactored history reads low.'
-  );
-}
-
-// ---------------------------------------------------------------- drift
-async function drift(glob) {
-  const cfg = await config();
-  const convs = Object.entries(cfg.conventions ?? {});
-  if (!convs.length) die('jev.config.json has no conventions');
-  const files = await tracked(glob ? [glob] : (cfg.include ?? ['**/*.ts', '**/*.tsx']));
-  const questions = Object.fromEntries(
-    convs.map(([k, c]) => [k, { type: 'noul', instructions: c.ask, criteria: { true: c.drift, false: c.ok } }])
-  );
-
-  let flagged = 0;
-  for (const path of files) {
-    const state = await readFile(path, 'utf8');
-    const r = await ask(state, questions);
-    const hits = Object.entries(r.answers)
-      .filter(([k, v]) => v.noul >= (cfg.threshold ?? 0.7) && !exempt(cfg, k, path))
-      .sort((a, b) => b[1].noul - a[1].noul);
-    if (!hits.length) continue;
-    flagged++;
-    console.log(`\n${path}`);
-    for (const [k, v] of hits) console.log(`  ${bar(v.noul)} ${v.noul.toFixed(2)}  ${k}`);
-  }
-  console.log(`\n${flagged}/${files.length} files flagged.`);
-  console.log('  Verify each before acting: a correct flag can still be a deliberate choice.');
-}
-
-// ---------------------------------------------------------------- gate
-async function gate(ref) {
-  const cfg = await config();
-  const gates = Object.entries(cfg.gates ?? {});
-  if (!gates.length) die('jev.config.json has no gates');
-  const diff = ref ? await git(['show', ref]) : await git(['diff', '--cached']);
-  if (!diff.trim()) die(ref ? `${ref} has no diff` : 'nothing staged');
-
-  const questions = Object.fromEntries(
-    gates.map(([k, g]) => [k, { type: 'noul', instructions: g.ask, criteria: { true: g.risk, false: g.ok } }])
-  );
-  const r = await ask(diff, questions);
-  const rows = Object.entries(r.answers).sort((a, b) => b[1].noul - a[1].noul);
-  const threshold = cfg.threshold ?? 0.7;
-  const hits = rows.filter(([, v]) => v.noul >= threshold);
-
-  console.log(`\n${ref ?? 'staged'}  ${(diff.length / 1024).toFixed(1)}KB  ${r.ms}ms`);
-  for (const [k, v] of rows) console.log(`  ${bar(v.noul)} ${v.noul.toFixed(2)}  ${k}`);
-  if (!hits.length) {
-    console.log('\n  pass');
-    return;
-  }
-  console.log(`\n  ${hits.length} flag(s) to review:`);
-  for (const [k] of hits) console.log(`    - ${cfg.gates[k].risk}`);
-  console.log('\n  These are prompts for a human look, not verdicts. Exit 1 so hooks can stop.');
-  process.exitCode = 1;
-}
-
-// Only dispatch when run as a CLI, so tests can import the helpers above.
-// import.meta.url is a percent-encoded realpath URL, so comparing it to `file://${argv[1]}` made
-// every command a silent no-op when the path held a space (skill dirs) or crossed a symlink (the
-// `npm link` bin shim, /tmp on macOS). realpathSync + pathToFileURL normalises both halves.
-if (import.meta.url === pathToFileURL(realpathSync(process.argv[1])).href) {
-  const argv = process.argv.slice(2);
-  const json = argv.includes('--json');
-  const [cmd, arg] = argv.filter((a) => a !== '--json');
-  const cmds = { rerank, drift, gate, validate, check, key };
-  if (!cmds[cmd]) die('usage: jev <rerank|drift|gate|validate|check|key> [arg] [--json]');
-  await cmds[cmd](arg, json);
 }

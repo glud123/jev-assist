@@ -1,388 +1,124 @@
 # jev-assist
 
-Don't burn your expensive main model on grep-and-guess grunt work — let jev rank the whole repo, and save the main model for reading the right files and writing the right code.
+[![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist) [![CI](https://github.com/glud123/jev-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/glud123/jev-assist/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/jev-assist)](https://www.npmjs.com/package/jev-assist)    [中文](README.zh-CN.md)
 
-[![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist)
-[中文](README.zh-CN.md)
+One calibrated number per candidate, for a coding agent's floods. Pipe any search's output in
+— raw `grep -rn`, `git ls-files`, a test run, no reformatting — and get a sorted list back
+with a cut line and an exact total: the same ~30 rows whether the pool was 40 or 4,000. Built
+on the three typed judgments of [TypeSafe Jev](https://docs.typesafe.ai): `noul` (is this hit
+real?), `choice` (what is it?), `score` (how bad is it?).
 
-Starting a task in a 600-file repo, perhaps 8 of those files are worth reading. Finding the 8
-often costs more than changing them.
+Search says where a hit is. This decides what each hit *is*. Finding things stays with
+`grep`/`rg`/`Glob` — nothing here searches, by design.
 
-Existing approaches have their limits. Grep needs the task's words to appear in the code, so when
-they don't — the task is in another language, the copy lives only in i18n keys, the code names the
-feature differently — it comes back empty. Having a model read the whole repo costs time and
-tokens in proportion to the file count. Neither suits a judgment that has to be applied at scale —
-the same question asked of every file.
+## Example
 
-jev-assist delegates that class of judgment to [TypeSafe Jev](https://docs.typesafe.ai), which
-asks every file the same question and gets back a concrete answer with a probability — yes or
-no, or a score — rather than prose. Three
-commands follow from it: `rerank` ranks every file by relevance to a task, `drift` checks files
-one by one against your team's conventions, and `gate` judges whether a diff about to be committed
-touches something dangerous.
+```sh
+$ grep -rn "getUser" src/ | jev noul 'this line calls the user API in production code, not a test, mock, or comment'
+jev noul · 4 candidate(s) · 1 call(s) · 1046ms · 459 input tok · 0/4 cache hit(s)
+  "this line calls the user API in production code, not a test, mock, or comment"
+  yes 2 / 4 at p >= 0.70
+  --- cut: read above (2 row(s); p >= 0.70; 2 below) ---
+0.72	"src/api/user.ts:12:  const user = await getUser(id);"
+0.70	"src/hooks/useAuth.ts:22:  return getUser(session.token);"
+```
 
-The cost structure is what makes this viable: output tokens are free and the questions inside one
-call are evaluated in parallel, so asking 10 of them costs about what asking 1 costs. Whole-repo
-passes only make financial sense under that pricing.
+Read above the cut; that is the answer. Every number in the banner is over the full pool,
+never a cap.
 
 ## Install
 
-**Recommended: let a coding agent do it.** Hand it this prompt, with `<your-key>` replaced:
+Requires Node 18+ and a [TypeSafe](https://docs.typesafe.ai) or
+[OpenRouter](https://openrouter.ai) API key.
 
+**Upgrading from a version before 1.0.0:** older releases shipped hooks and config files that
+no longer exist. Give your agent this prompt, then reinstall fresh:
+
+```text
+Completely delete the jev-assist skill, including any hooks, config files, and other artifacts left by the old version.
 ```
-Install the jev-assist skill with npx skills add glud123/jev-assist, then finish the setup
-per its SKILL.md: run jev key with the key <your-key>, run its install-hook.mjs, write a
-jev.config.json in this repo's root, and run jev check plus jev validate 20. Show me the
-results along with which conventions you inferred from reading code versus which ones you
-guessed.
+
+Current versions write nothing but the skill directory, the key file, and the cache.
+
+**Let your agent use it right now** — paste this as a prompt to your coding agent:
+
+```text
+Run `npx skills use "https://github.com/glud123/jev-assist" --skill "jev-assist"` and follow the generated skill instructions now. Read its complete output, redirecting it to a temporary file first if necessary. Resolve relative paths from the supporting-files directory it provides.
 ```
 
-It has read your code, and `SKILL.md` tells it what to derive from where, so the first draft of
-the config comes faster from the agent than from you. Get the key first at
-[console.typesafe.ai/keys](https://console.typesafe.ai/keys) — without one the agent stops at
-the first step, because every command that reaches the API fails without it.
-
-**Manual install.**
+**Install the skill** so it is available to your agent in every session:
 
 ```sh
-npx skills add glud123/jev-assist                        # install the skill
-jev key sk-...                                           # key → ~/.config/jev/key, 0600, outside the repo
-node <skill-dir>/scripts/install-hook.mjs                # per machine; see below
-cp <skill-dir>/jev.config.example.json jev.config.json   # then edit it, in the repo being judged
-jev check                                                # verify key and config
+npx skills add https://github.com/glud123/jev-assist --skill jev-assist
 ```
 
-`install-hook.mjs` registers two hooks in `~/.claude/settings.json`: a `SessionStart` one so each
-session starts knowing this skill exists, and a `PreToolUse` one that asks for confirmation the
-first time a session runs a repo-wide file-listing search (`grep -rl`/`-rc`/`--include`, or the
-`Grep` tool in a file-listing mode). The second exists because the first was not enough — a session
-with the reminder fully in context still answered "which files have no i18n yet" with nine greps
-and a number that was 20% too high, because injected text sits far behind the moment the reflex
-fires. It asks rather than blocks, once per session, and passes silently on anything it cannot
-classify.
-
-Skip both and the skill still works when asked for by name, but an agent mid-task will reach for
-`grep` instead. The installer is additive and idempotent, keeps any other hooks on those events,
-refuses to write a settings file it cannot parse, and leaves a `.jev-bak` copy beside it. Takes
-effect in the next session, not the one that ran it.
-
-Node 18 or newer, because it uses the built-in `fetch`. Nothing else to install. Any
-skills-compatible agent works — Claude Code, Codex and Cursor read the same `SKILL.md` and call
-the script by path.
-
-Installing as a skill does not put `jev` on your PATH. If you want the command in your own
-shell:
+**Or install the CLI globally** if you want `jev` on your own PATH:
 
 ```sh
-git clone https://github.com/glud123/jev-assist && cd jev-assist && npm link
+npm i -g jev-assist   # or call scripts/jev.mjs directly by path
 ```
 
-**Uninstall.** Deleting the skill is not enough — the setup writes a key, a config and up to three
-hooks, all outside the skill directory, and every hook names a script by path: the pre-commit one
-breaks every commit once it is gone, the `SessionStart` one breaks every session, the `PreToolUse`
-one breaks every shell and search call. Hand an agent this prompt and `SKILL.md` gives it the full
-list:
+Installed as a skill only, `jev` is not on PATH — call the script by absolute path
+(`node /path/to/jev-assist/scripts/jev.mjs …`).
 
-```
-Uninstall the jev-assist skill following the Uninstall section of its SKILL.md: remove the
-pre-commit hook, the SessionStart and PreToolUse hooks, the stored key, any JEV_ environment
-variables, the per-repo config and output, and the skill itself. Show me anything you are
-unsure about before deleting it.
-```
+### API key
 
-By hand, hooks first — while the script is still there to run:
+Store it once, outside the repo:
 
 ```sh
-node <skill-dir>/scripts/install-hook.mjs --remove   # drops both the SessionStart and PreToolUse hooks
-rm -f .git/hooks/pre-commit              # only if `jev gate` is all it contains
-rm -f ~/.config/jev/key                  # per machine ($XDG_CONFIG_HOME/jev/key if set)
-rm -f jev.config.json .jev-rerank.json   # per judged repo, from its root
-grep -rn JEV_ ~/.zshrc ~/.bashrc .env    # a key left in a rc file is still a live key
-npm unlink -g jev-assist                 # only if you ran npm link
+jev key sk-or-v1-...   # skill-only install: node /path/to/jev-assist/scripts/jev.mjs key sk-or-v1-...
 ```
 
-## Using it in an agent session
+The key lands in `~/.config/jev/key` at 0600; `JEV_API_KEY` in the environment wins. Keys
+with the `sk-or-` prefix route via OpenRouter, everything else to TypeSafe directly
+(`JEV_API_URL`/`JEV_MODEL` override). Never write a key into a tracked file.
 
-The point of the skill is that the agent reaches for it when it should. You state the task the way
-you would say it to a teammate — your own words, your own language, no file names — with the
-session's working directory set to the repo being judged:
+If you use jev as a skill and no key is set, the agent stops and asks you for one at the
+first judgment call — a missing key fails in milliseconds with the exact command to run, and
+that is when the agent asks. No key pre-flight, no per-project config: the question is the
+interface.
 
-```
-优化一下用户反馈列表页的表格，列太多不好对照
-```
+## Usage
 
-```
-When a user deletes their account, their scheduled exports keep running — find where that's handled
-```
-
-The skill's description tells the agent when to fire without being asked, and grep is always the
-probe that decides. If it converges on one neighborhood, nothing here runs — the agent reads the
-files. Otherwise the probe's outcome picks the command:
-
-- **Empty**, or flooded with hits the agent cannot **rank** → `rerank`. The task's words and the
-  code's words don't overlap: another natural language, copy that lives only in i18n keys, a
-  feature the code names differently.
-- **Flooded** with hits the agent cannot **classify** → `drift`. The literal matches but answers a
-  different question than the one asked, and telling the real instances apart means knowing what a
-  file is or what a match means — context no pattern can carry.
-- **A staged diff** → `gate`.
-
-Rank versus classify is what routes a flood to the right command: *which of these files matter for
-my change* needs an ordering, *which of these hits are real* needs a yes/no per file. Phrasing
-never triggers anything on its own — a vaguely worded question whose words match the code is still
-grep's job.
-
-Naming the skill also works, and is the fallback when it doesn't fire on its own:
-
-```
-Use jev-assist to find which files this task touches before you start: add CSV export to
-the orders table.
-```
-
-```
-Run jev-assist drift over src/**/*.tsx and rank what it flags by severity.
-```
-
-```
-Before I commit, use jev-assist to check whether the staged changes touch anything dangerous.
-```
-
-The agent calls `scripts/jev.mjs` as described in `SKILL.md` and reads the ranking or the flags
-back to you. On a repo it has not used this on before, have it run `jev validate 20` first —
-whether the ranking is accurate is a measurable fact, not a claim you have to take.
-
-## What it actually does
-
-jev-assist hands the model three repo-wide judgments — task relevance, convention compliance,
-diff risk — plus one command to verify accuracy:
-
-**`jev rerank "<task>"`** ranks every tracked file against a one-line task description. On a
-705-file repo, replaying 10 real commits: the top 20 covered 68% of the files those commits
-touched, the top 40 covered 80%. Its edge over grep is files that share no token with the
-task — for an image-upload task, a shared upload service in an unrelated corner of the app
-ranked 6th. Beyond the rows it prints, the ranking is unreliable; follow the imports of the top
-results instead.
-
-**`jev drift [glob]`** checks each file against your conventions, one call per file. The input
-is the convention itself, not a match pattern — judging what breaks it is left to the model,
-which surfaces violations grep cannot express: untranslated copy, calls bypassing the request
-wrapper, server state living outside the store. Question count barely moves the cost, so check
-several things at once.
-
-**`jev gate [ref]`** flags risk in the staged diff and exits nonzero on a hit, so it works as a
-pre-commit hook on its own. Risk scores on four real commits: a decryption feature 0.99, a fix
-that swallowed errors 0.91, a CSS tweak 0.64, a comment-only change 0.03; 0.7–1.8 s per diff.
-Type checks, lint and unit tests all miss a change that silently drops user input — that is why
-this command exists.
-
-**`jev validate [n]`** measures rerank accuracy on your own repo using your git history: it
-replays past commits as tasks and grades the ranking against the files each commit actually
-touched. Accuracy does not transfer across repos, so run it first on a new one.
-
-## Commands
+One shape, three judgments — the subcommand picks the type of the number:
 
 ```sh
-cd /path/to/your/repo
-jev check                                    # key + config, before anything else
-jev validate 20                              # start here: is it accurate?
-jev rerank "add CSV export to the orders table"
-jev drift 'src/**/*.tsx'
-jev gate                                     # staged changes
-jev gate HEAD~1                              # a past commit
+# which of these hits is the real thing (0–1 per line)
+grep -rn "getUser" src/ | jev noul 'this line calls the user API in production code, not a test, mock, or comment'
+
+# which layer each file belongs to (a label per file)
+git ls-files 'src/**' | jev choice 'what layer does this file belong to?' \
+  --opt api:"HTTP handler or route" --opt db:"schema, migration, or query" --opt ui:"component or view"
+
+# how severe each TODO is (a rubric level per line)
+grep -rn "TODO\|FIXME" src/ | jev score 'is this TODO still valid?' \
+  --level 0:"stale, the code moved on" --level 1:"valid, minor" --level 2:"valid and blocking a known bug"
 ```
 
-| Command | Question it answers | Cost |
-| --- | --- | --- |
-| `jev rerank "<task>" [--json]` | Which files matter for this task? | 1 call / `batchSize` files (default 60) |
-| `jev validate [n]` | Is rerank accurate enough **on my repo**? | n × rerank |
-| `jev drift [glob]` | Which files drifted from our conventions? | 1 call / file |
-| `jev gate [ref]` | Does this diff touch something dangerous? | 1 call / diff |
-| `jev check` | Is my key and config well-formed? | free, no network |
-| `jev key <k>` | Store an API key outside the repo | free, no network |
+Flags: `--top N` (fix the cut), `--by-file N` / `--by-dir N` (census of the selected rows by
+path or directory — top N, rest summed exactly), `--json` (every row, uncapped), `--fresh`
+(re-judge; verdicts still merge into the cache). Exit 1 on any error — a failed call never
+prints a count that looks like zero.
 
-`rerank` prints the top N and nothing else (`topN`, default 20). Pass `--json` when something
-needs the ranking past what was printed — it writes the full ranking to `.jev-rerank.json` in
-the repo root; add that file to `.gitignore`.
+For the agent-facing routing rules, question-phrasing guidance, and measured failure modes,
+read [SKILL.md](SKILL.md).
 
-Read the printed list by the scores, not by the row count. `topN` is a fixed number of rows, not a
-filter — a task that genuinely touches 3 files still prints 20, and the bottom 17 are merely the
-least unrelated files in the repo.
+## Privacy
 
-Scores are levels, not probabilities: 0 to 3, where 3 is "likely must be read or edited", 2 is
-"shows the existing pattern to follow", 1 is background and 0 is unrelated. Read everything at 2.5
-or above. Cut at a gap below that if there is one, but do not wait for a gap — a top 20 spanning
-half a point means nothing stood out, not that all 20 are candidates.
+Each call sends the candidate lines, the question, and the API key to the Jev endpoint.
+Verdicts are cached in `~/.cache/jev/cache.json` keyed by question+line — jev is
+self-consistent by design, so a cached verdict is the verdict; `--fresh` recomputes. If the
+repo must not leave the machine, do not point jev at it.
 
-### Wiring up pre-commit
+## Uninstall
 
-One line for an agent:
+Delete the skill directory, then: `rm -f ~/.config/jev/key` (a credential — deleting it is
+the point), `rm -rf ~/.cache/jev`, and `npm unlink -g jev-assist` if `which jev` resolves.
+Nothing else was written: no config, no hooks, nothing in any repo.
 
-```
-Wire jev gate into this repo's pre-commit hook. If a hook already exists, append a line
-instead of overwriting it.
-```
+## Not for
 
-By hand:
+Retrieval; pools small enough to read; anything a compiler, linter, or test decides; judging
+candidates you generated yourself.
 
-```sh
-h=.git/hooks/pre-commit
-[ -e "$h" ] && echo "$h exists — add a 'jev gate' line to it yourself" ||
-  { printf '#!/bin/sh\njev gate\n' > "$h" && chmod +x "$h"; }
-```
-
-It writes a hook containing just `jev gate` and marks it executable when there is no hook, and
-only prints a note when one already exists — which it will if Husky or pre-commit is installed.
-
-## Configure
-
-The config is per project: `jev.config.json` lives in the root of the repo being judged, one per
-repo, never shared and never in the jev-assist repo itself. The reason is that the phrasing of a
-question depends on the codebase — wording that catches untranslated copy in an i18next app is
-not even meaningful in an app with no i18n, where it would flag every file.
-
-```jsonc
-{
-  "description": "A React admin dashboard built with TanStack Query and i18next.",
-  "include": ["src/**/*.ts", "src/**/*.tsx"],
-
-  "conventions": {
-    "hardcoded_copy": {
-      "ask": "Does this file contain user-visible UI text inline instead of i18next keys?",
-      "drift": "has hardcoded user-visible copy",
-      "ok": "all copy is translated, or the file has no UI text. Mock data and fixtures do not count."
-    }
-  },
-
-  "gates": {
-    "data_loss": {
-      "ask": "Could this change lose or silently discard user-entered data?",
-      "risk": "a realistic path exists where user input is lost",
-      "ok": "user data is preserved on every path"
-    }
-  },
-
-  "exemptions": {
-    "hardcoded_copy": ["/mocks/", ".test."]
-  },
-
-  "batchSize": 60,
-  "topN": 20,
-  "threshold": 0.7,
-  "validateK": [20, 40]
-}
-```
-
-Top-level fields:
-
-| Field | Required | Default | Meaning |
-| --- | --- | --- | --- |
-| `description` | yes | — | One line on what the app is and what it is built with. Every question carries it as context, so name the libraries the conventions below refer to |
-| `include` | yes | — | Globs defining the file pool for `rerank` and `drift`; only git-tracked files are considered. Confirm it matches something with `git ls-files '<glob>' \| wc -l` |
-| `conventions` | no | — | The rules `drift` checks. Keys are yours to name. Only rules this codebase actually follows |
-| `gates` | no | — | The risks `gate` checks. Same shape as `conventions`, asked against a diff |
-| `exemptions` | no | — | Per convention, a list of path substrings; a file whose path contains one skips that check |
-| `batchSize` | no | `60` | Files scored per `rerank` call |
-| `topN` | no | `20` | Rows `rerank` prints. A fixed count, not a relevance filter |
-| `threshold` | no | `0.7` | Probability at or above which something counts as a hit, shared by `drift` and `gate` |
-| `validateK` | no | `[20, 40]` | Take the top K of each ranking to compute recall — the `recall@20`, `recall@40` in the output |
-
-Inside each entry of `conventions` and `gates`:
-
-| Field | Meaning |
-| --- | --- |
-| `ask` | The yes/no question put to the model, answered with a probability. Anchor it to the concrete module ("the request wrapper in `src/services`"), never to a principle |
-| `drift` / `risk` | The line printed on a hit. `conventions` use `drift`, `gates` use `risk` |
-| `ok` | What counts as passing. Exclusions go here; this is the main place you tune |
-
-`jev check` rejects a config missing `description` or `include`, and also catches the mechanical
-faults — placeholders left in, empty groups, an exemption naming a convention that does not
-exist. What it cannot do is read your code, so it cannot tell whether a question holds in this
-repo at all: a convention asking about a shared request wrapper you never had passes check and
-then flags every file. Ask the agent which conventions it found by reading code and which ones it
-guessed at — the guesses are where the problems are.
-
-Tuning happens in the `ok` text. Nearly all the noise you will see is a judgment that is
-literally correct and not worth acting on — a deliberate `catch {}`, copy inside mock chart
-data. Say so in `ok`. Raising `threshold` does not help: the noise scores high too — that
-deliberate `catch {}` came back at 0.91 — so a bar at 0.95 keeps it and drops the genuine
-findings sitting between 0.75 and 0.9 instead.
-
-### Key and endpoint
-
-`jev key <API_KEY>` writes the key to `~/.config/jev/key` at mode 0600 — or to
-`$XDG_CONFIG_HOME/jev/key` when that variable is set. Never in the repo.
-
-The endpoint is derived from the key's prefix, since both providers take the same request body:
-
-| Key prefix | Provider | Endpoint | Model |
-| --- | --- | --- | --- |
-| `sk-or-…` | OpenRouter | `https://openrouter.ai/api/alpha/decisions` | `~typesafe/jev-latest` |
-| anything else | TypeSafe direct | `https://api.typesafe.ai/v1/systemone` | `jev-latest` |
-
-Three environment variables override that:
-
-| Variable | Effect |
-| --- | --- |
-| `JEV_API_KEY` | The key to use. Takes precedence over the stored file, which is then not read |
-| `JEV_API_URL` | The endpoint to call, replacing the prefix-derived one. Use for a self-hosted gateway |
-| `JEV_MODEL` | The model to request, replacing the prefix-derived one. Use to pin a version |
-
-The two URL/model variables are independent: set `JEV_MODEL` alone and the endpoint still comes
-from the key prefix. `jev check` prints the key masked along with the provider, endpoint and model
-actually in play — worth reading before debugging a call, since a key sent to the wrong provider
-comes back as a plain 401.
-
-## Validate before trusting
-
-Typed output guarantees the shape of an answer. Nothing about the answer.
-
-```sh
-jev validate 20
-```
-
-A commit subject is a task and the files that commit changed are the answer. `validate` walks
-back through non-merge commits until it has n that touched something inside `include`, ranks the
-whole repo against each subject line, and prints recall for each K — the share of truly changed
-files that land in the top K, the @20 and @40 columns below.
-
-```
-  #  task                                 truth   @20   @40
-  1  fix avatar upload failing on Safari      7     5     6
-  2  add CSV export to the orders table       4     4     4
-  3  bump deps and fix lint                  12     2     3
-
-  recall@20 0.48   recall@40 0.57   (23 files over 3 commits)
-  worst: "bump deps and fix lint" — 2/12
-```
-
-That last line deserves as much attention as the first. Dependency bumps and sweeping renames
-carry no semantic signal and will always score badly, which is a fact about the task rather than
-a defect in the tool. It tells you when to skip `rerank` and just grep.
-
-Two adjustments a hand-rolled comparison gets wrong, if you were thinking of writing this
-yourself with `git show --name-only`. Files a commit **added** are excluded, since they did not
-exist when the task was written and counting them inflates recall. Files it **deleted** are gone
-from today's tree and cannot be ranked at all. Commits that touched nothing rankable get skipped
-rather than scored as zero, so `validate 20` may look further back than twenty commits.
-
-Run it before trusting `drift` or `gate` on a new repo too. It only grades `rerank`, but a repo
-where `rerank` reads low is a repo where the config's phrasing needs work first.
-
-## Known limits
-
-- **rerank cannot see structural coupling.** A file that changed only because something it
-  imports changed has no semantic signal, and one such file landed at 121 out of 705. Follow
-  the imports of the top results.
-- **Correct is not the same as actionable.** Validation turned up a 0.91 `silent_catch` on an
-  intentional empty catch that had a comment above it explaining why the failure was safe.
-  Budget time for tuning criteria. An audit that cries wolf gets muted, and a muted gate costs
-  money while buying a false sense of coverage.
-- **No retry, no concurrency control.** Sequential calls, no 429 backoff. Fine up to a few
-  thousand files. Past that, add `p-limit` and exponential backoff.
-- **Do not judge candidates you just generated.** If the state and the options both come out of
-  one model, the probability measures its self-consistency and nothing else. It will look like
-  validation.
-
-## License
-
-MIT
+MIT — see [LICENSE](LICENSE).
