@@ -1,6 +1,7 @@
 # jev-assist
 
-[![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist) [![CI](https://github.com/glud123/jev-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/glud123/jev-assist/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/jev-assist)](https://www.npmjs.com/package/jev-assist)    [English](README.md)
+[![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist) [![CI](https://github.com/glud123/jev-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/glud123/jev-assist/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/jev-assist)](https://www.npmjs.com/package/jev-assist)
+[English](README.md)
 
 给编码 agent 的候选洪水一个校准过的数。任何搜索的输出从 stdin 进来——原样 `grep -rn`、
 `git ls-files`、测试运行，无需重新格式化——回来的是排好序的列表，带切分线和精确总数：
