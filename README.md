@@ -1,6 +1,7 @@
 # jev-assist
 
 [![skills.sh installs](https://skills.sh/b/glud123/jev-assist)](https://skills.sh/glud123/jev-assist) [![CI](https://github.com/glud123/jev-assist/actions/workflows/ci.yml/badge.svg)](https://github.com/glud123/jev-assist/actions/workflows/ci.yml) [![npm](https://img.shields.io/npm/v/jev-assist)](https://www.npmjs.com/package/jev-assist)
+
 [中文](README.zh-CN.md)
 
 One calibrated number per candidate, for a coding agent's floods. Pipe any search's output in
