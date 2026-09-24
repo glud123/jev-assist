@@ -34,6 +34,8 @@ nothing is capped.
 Requires Node 18+ and a [TypeSafe](https://docs.typesafe.ai) or
 [OpenRouter](https://openrouter.ai) API key.
 
+### Agent install
+
 **Upgrading from before 1.0.0:** older releases shipped hooks and config files that are gone
 now. Give your agent this prompt, then reinstall:
 
@@ -43,26 +45,28 @@ Completely delete the jev-assist skill, including any hooks, config files, and o
 
 Current versions write only three things: the skill directory, the key file, and the cache.
 
-**Let your agent use it right now** — paste this prompt to your coding agent:
+**Use it right now** — paste this prompt to your coding agent:
 
 ```text
 Run `npx skills use "https://github.com/glud123/jev-assist" --skill "jev-assist"` and follow the generated skill instructions now. Read its complete output, redirecting it to a temporary file first if necessary. Resolve relative paths from the supporting-files directory it provides.
 ```
 
-**Install the skill** so your agent has it in every session:
+**Or install the skill** so your agent has it in every session:
 
 ```sh
 npx skills add https://github.com/glud123/jev-assist --skill jev-assist
 ```
 
-**Or install the CLI globally** to get `jev` on your own PATH:
+Skill-only installs do not put `jev` on PATH — call the script by absolute path
+(`node /path/to/jev-assist/scripts/jev.mjs …`).
+
+### Manual install
+
+For your own terminal:
 
 ```sh
 npm i -g jev-assist   # or call scripts/jev.mjs directly by path
 ```
-
-Skill-only installs do not put `jev` on PATH — call the script by absolute path
-(`node /path/to/jev-assist/scripts/jev.mjs …`).
 
 ### API key
 

@@ -32,6 +32,8 @@ jev noul · 4 candidate(s) · 1 call(s) · 1046ms · 459 input tok · 0/4 cache 
 需要 Node 18+，以及一个 [TypeSafe](https://docs.typesafe.ai) 或
 [OpenRouter](https://openrouter.ai) 的 API key。
 
+### Agent 安装
+
 **从 1.0.0 之前的版本升级：** 旧版本会安装 hooks 和配置文件，现已全部移除。把下面这句
 发给你的 agent，删干净后再重新安装：
 
@@ -41,26 +43,28 @@ jev noul · 4 candidate(s) · 1 call(s) · 1046ms · 459 input tok · 0/4 cache 
 
 现在的版本只写三样东西：skill 目录、key 文件、缓存。
 
-**让 agent 立即使用**：把下面这段 prompt 发给你的编码 agent：
+**立即使用**：把下面这段 prompt 发给你的编码 agent：
 
 ```text
 Run `npx skills use "https://github.com/glud123/jev-assist" --skill "jev-assist"` and follow the generated skill instructions now. Read its complete output, redirecting it to a temporary file first if necessary. Resolve relative paths from the supporting-files directory it provides.
 ```
 
-**安装 skill**，让它在每次会话里都可用：
+**或安装 skill**，让它在每次会话里都可用：
 
 ```sh
 npx skills add https://github.com/glud123/jev-assist --skill jev-assist
 ```
 
-**或全局安装 CLI**，在自己终端里直接用 `jev`：
+只装 skill 的话 `jev` 不在 PATH 上，请按绝对路径调用脚本
+（`node /path/to/jev-assist/scripts/jev.mjs …`）。
+
+### 人工安装
+
+在自己终端里直接用 CLI：
 
 ```sh
 npm i -g jev-assist   # 或者直接按路径调用 scripts/jev.mjs
 ```
-
-只装 skill 的话 `jev` 不在 PATH 上，请按绝对路径调用脚本
-（`node /path/to/jev-assist/scripts/jev.mjs …`）。
 
 ### API key
 
